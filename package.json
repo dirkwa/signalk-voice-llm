@@ -1,6 +1,6 @@
 {
   "name": "signalk-voice-llm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Answer boat voice commands with a local or remote LLM: subscribes to voice.command (from signalk-wyoming), asks an OpenAI-compatible LLM (LM Studio, Ollama, etc.), and speaks the reply back via say().",
   "main": "dist/index.js",
   "files": [
@@ -36,7 +36,7 @@
     "node": ">=22"
   },
   "author": "Dirk Wahrheit <dirkwahrheit@gmail.com>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dirkwa/signalk-voice-llm.git"
