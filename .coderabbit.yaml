@@ -67,6 +67,28 @@ reviews:
         server. Flag any `throw` on a plugin lifecycle path, and any unawaited
         promise rejection that could surface as an unhandled rejection.
 
+        ## Schema defaults are spread at start()
+
+        Signal K does **not** seed JSON Schema defaults at runtime. `start()`
+        receives the saved config verbatim — `{}` on first enable, and
+        possibly partial after the schema gains a new field. `SCHEMA_DEFAULTS`
+        is the single source of truth; the JSON Schema's `default` values read
+        from it so the two cannot drift.
+
+        Flag:
+
+        - Any read of `config.llm.*` or `config.context.*` off the raw
+          `start()` argument instead of the merged result.
+        - Replacing the one-level-deep merge in `withDefaults()` with a plain
+          spread — that leaves a newly-added `llm.*` field undefined for users
+          whose saved config predates it.
+        - A literal `default:` value in the schema that duplicates rather than
+          references `SCHEMA_DEFAULTS`.
+
+        This previously crashed with
+        `Cannot read properties of undefined (reading 'baseUrl')` on
+        `plugin.start({})`, which is exactly what the plugin CI harness calls.
+
         ## say() acquisition is deliberately defensive
 
         The `say()` handle comes from signalk-wyoming over PropertyValues, not

@@ -65,6 +65,44 @@ const DEFAULT_SYSTEM_PROMPT =
   "it to answer questions about the vessel; if you don't have the data, say " +
   "so plainly. Prefer nautical units (knots, metres, degrees).";
 
+// Signal K does not seed schema defaults at runtime: start() receives whatever
+// is in the saved config, which is `{}` on first enable and may be a partial
+// object after a schema gains new fields. These defaults are the single source
+// of truth — the JSON Schema below reads from them — and are spread over the
+// incoming config in start().
+const SCHEMA_DEFAULTS: Config = {
+  llm: {
+    baseUrl: "http://192.168.0.50:1234/v1",
+    model: "qwen2.5-7b-instruct",
+    apiKey: "",
+    temperature: 0.4,
+    maxTokens: 200,
+    timeoutMs: 30000,
+  },
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  context: {
+    navigation: true,
+    anchor: true,
+    environment: true,
+    electrical: true,
+  },
+  replyTargetOriginOnly: true,
+  speakErrors: true,
+};
+
+// Deep-merge for the one nested level this config has. A plain spread would
+// let a saved config that predates a new llm.* field leave that field
+// undefined, which is the same crash in slower motion.
+function withDefaults(incoming: Partial<Config> | undefined): Config {
+  const cfg = incoming ?? {};
+  return {
+    ...SCHEMA_DEFAULTS,
+    ...cfg,
+    llm: { ...SCHEMA_DEFAULTS.llm, ...(cfg.llm ?? {}) },
+    context: { ...SCHEMA_DEFAULTS.context, ...(cfg.context ?? {}) },
+  };
+}
+
 module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
   let say: SayFn | null = null;
@@ -88,35 +126,35 @@ module.exports = function (app: App) {
               title: "Base URL",
               description:
                 "OpenAI-compatible endpoint. LM Studio: http://<windows-ip>:1234/v1 · Ollama: http://<host>:11434/v1",
-              default: "http://192.168.0.50:1234/v1",
+              default: SCHEMA_DEFAULTS.llm.baseUrl,
             },
             model: {
               type: "string",
               title: "Model",
               description:
                 "Model id as loaded in the server (LM Studio shows it at the top). E.g. qwen2.5-7b-instruct",
-              default: "qwen2.5-7b-instruct",
+              default: SCHEMA_DEFAULTS.llm.model,
             },
             apiKey: {
               type: "string",
               title: "API key",
               description: "Usually empty for local servers (LM Studio/Ollama).",
-              default: "",
+              default: SCHEMA_DEFAULTS.llm.apiKey,
             },
             temperature: {
               type: "number",
               title: "Temperature",
-              default: 0.4,
+              default: SCHEMA_DEFAULTS.llm.temperature,
             },
             maxTokens: {
               type: "number",
               title: "Max reply tokens",
-              default: 200,
+              default: SCHEMA_DEFAULTS.llm.maxTokens,
             },
             timeoutMs: {
               type: "number",
               title: "Request timeout (ms)",
-              default: 30000,
+              default: SCHEMA_DEFAULTS.llm.timeoutMs,
             },
           },
         },
@@ -124,35 +162,38 @@ module.exports = function (app: App) {
           type: "string",
           title: "System prompt",
           description: "How the assistant should behave. Keep replies short — they are spoken.",
-          default: DEFAULT_SYSTEM_PROMPT,
+          default: SCHEMA_DEFAULTS.systemPrompt,
         },
         context: {
           type: "object",
           title: "Boat data the assistant can use",
           properties: {
-            navigation: { type: "boolean", title: "Navigation (position, speed, course, depth)", default: true },
-            anchor: { type: "boolean", title: "Anchor (state, radius, drag)", default: true },
-            environment: { type: "boolean", title: "Environment / wind", default: true },
-            electrical: { type: "boolean", title: "Electrical / tanks", default: true },
+            navigation: { type: "boolean", title: "Navigation (position, speed, course, depth)", default: SCHEMA_DEFAULTS.context.navigation },
+            anchor: { type: "boolean", title: "Anchor (state, radius, drag)", default: SCHEMA_DEFAULTS.context.anchor },
+            environment: { type: "boolean", title: "Environment / wind", default: SCHEMA_DEFAULTS.context.environment },
+            electrical: { type: "boolean", title: "Electrical / tanks", default: SCHEMA_DEFAULTS.context.electrical },
           },
         },
         replyTargetOriginOnly: {
           type: "boolean",
           title: "Reply only to the satellite that asked",
           description: "If off, the answer plays on all satellites.",
-          default: true,
+          default: SCHEMA_DEFAULTS.replyTargetOriginOnly,
         },
         speakErrors: {
           type: "boolean",
           title: "Speak errors aloud",
           description: "If the LLM is unreachable, say a short spoken error instead of staying silent.",
-          default: true,
+          default: SCHEMA_DEFAULTS.speakErrors,
         },
       },
     }),
 
-    start(config: Config) {
+    start(incoming: Partial<Config>) {
       running = true;
+      // Signal K hands us the raw saved config — `{}` on first enable. Never
+      // read a nested field off it directly; see SCHEMA_DEFAULTS.
+      const config = withDefaults(incoming);
       // Diagnostic surfaced via status (readable over the API without the
       // plugin debug flag): reflects whether the say() handle was acquired.
       let sayAcquired = false;
