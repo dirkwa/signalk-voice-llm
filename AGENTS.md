@@ -55,13 +55,80 @@ voice.command (signalk-wyoming)  →  buildContext()  →  chat()  →  say()
 This repo is maintained by Dirk Wahrheit.
 
 - Branch names use **hyphens**, never slashes.
+- **Angular conventional commits** — see below. This applies to PR titles too,
+  since PRs are squash-merged and the title becomes the commit subject.
 - One logical change per commit and per PR.
 - No `Co-Authored-By` lines and no AI-attribution of any kind, in commits, PR
   bodies, or code.
 - Never commit directly to `main`. Every change goes through a PR.
-- Version bumps live in their own release PR, and only when explicitly asked.
+- **Release bumps are their own PR** — see below.
 - PR descriptions: no checkboxes. "Tested" lists what actually ran, not what
   was planned.
+
+### Release PRs
+
+A version bump is a `chore(release): X.Y.Z` PR containing **nothing but the
+bump** — `package.json`, `package-lock.json`, and a changelog entry if one
+exists. No fixes, no tooling, no "while I was in there" changes riding along.
+Only cut one when explicitly asked.
+
+Two reasons this matters concretely:
+
+- The tag is the publish trigger. A release PR that also carries code means
+  the published artifact contains changes that were never reviewed as a
+  release, and `git show <tag>` stops being a straight answer to "what
+  shipped?".
+- `.coderabbit.yaml` skips review on titles starting `chore(release):`. Code
+  hidden in a release PR is code that silently bypasses review.
+
+If a fix and a release are both wanted, that is two PRs: the fix merges
+first, then the bump. Rewriting a release commit to extract mixed-in changes
+afterwards is strictly worse than splitting up front.
+
+### Commit and PR titles
+
+Angular conventional commits:
+
+```
+<type>(<scope>): <subject>
+```
+
+- **Subject** ≤ 50 chars, imperative mood ("add", not "adds" or "added"), no
+  trailing period, lower-case after the colon.
+- **Scope** is optional and names the area touched — `llm`, `context`,
+  `schema`, `ci`, `release`, `deps`. Omit it rather than inventing a vague one.
+- **Body** (after a blank line) explains _why_, wrapped at 72 chars. The diff
+  already shows what changed; the body should say what the reader can't see —
+  the failure it fixes, the constraint that forced the approach, what was
+  verified.
+
+Types used here:
+
+| Type       | For                                                              |
+| ---------- | ---------------------------------------------------------------- |
+| `feat`     | A new capability                                                 |
+| `fix`      | A bug fix                                                        |
+| `docs`     | Documentation only, including this file                          |
+| `refactor` | Behaviour-preserving restructuring                               |
+| `test`     | Adding or correcting tests                                       |
+| `build`    | Build config, TypeScript settings, packaging                     |
+| `ci`       | Workflows and CI configuration                                   |
+| `chore`    | Everything else — tooling, dependencies, `chore(release): X.Y.Z` |
+
+Examples from this repo's history, rewritten to the convention:
+
+```
+fix(schema): spread defaults before reading config
+ci: gate PRs on eslint and prettier
+chore(release): 0.2.1
+```
+
+Breaking changes get a `!` before the colon (`feat(llm)!: …`) and a
+`BREAKING CHANGE:` footer explaining the migration.
+
+Note that commits predating this convention do not follow it; `.github/release.yml`
+groups release notes by PR **label**, not by commit type, so the older
+subjects don't break changelog generation.
 
 ### Pre-PR checklist
 
