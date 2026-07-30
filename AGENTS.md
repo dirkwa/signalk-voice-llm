@@ -32,6 +32,14 @@ voice.command (signalk-wyoming)  →  buildContext()  →  chat()  →  say()
   `say()` handle, missing `subscriptionmanager`) calls `app.error(...)` or
   `app.setPluginError(...)` and returns. Never throw out of `start()` — a
   thrown plugin can take down the whole server.
+- **Spread `SCHEMA_DEFAULTS` at `start()`.** Signal K does not seed JSON
+  Schema defaults at runtime; `start()` receives the saved config verbatim,
+  which is `{}` on first enable and may be partial after the schema gains a
+  field. `SCHEMA_DEFAULTS` is the single source of truth and the schema's
+  `default` values read from it, so the two cannot drift. The merge is one
+  level deep on purpose — a plain spread would leave a newly-added `llm.*`
+  field undefined for existing users. Never read `config.llm.*` off the raw
+  argument.
 - **Replies are spoken, not read.** The system prompt constrains the model to
   one or two short sentences, no markdown, no lists, no emoji. Any change that
   invites longer or formatted output is a regression — TTS reads punctuation
