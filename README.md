@@ -67,4 +67,6 @@ In the plugin config:
 - Intent/actuation (voice → SignalK PUTs) as a separate concern.
 - Conversation memory / follow-ups.
 
-MIT.
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).
