@@ -10,7 +10,6 @@ export interface SelfPathReader {
 
 const RAD2DEG = 180 / Math.PI;
 const MS2KN = 1.943844;
-const MS2KMH = 3.6;
 
 // app.getSelfPath() may return either a bare value or a SignalK node object
 // ({ value, meta, timestamp, ... }). Unwrap the node so callers see the value.
@@ -62,10 +61,12 @@ export function buildContext(
     const pos = obj<{ latitude?: number; longitude?: number }>(
       reader.get("navigation.position"),
     );
-    if (pos && num(pos.latitude) !== undefined && num(pos.longitude) !== undefined) {
-      nav.push(
-        `position ${fmt(pos.latitude!, 5)}, ${fmt(pos.longitude!, 5)}`,
-      );
+    if (
+      pos &&
+      num(pos.latitude) !== undefined &&
+      num(pos.longitude) !== undefined
+    ) {
+      nav.push(`position ${fmt(pos.latitude!, 5)}, ${fmt(pos.longitude!, 5)}`);
     }
     const sog = num(reader.get("navigation.speedOverGround"));
     if (sog !== undefined) nav.push(`speed over ground ${fmt(sog * MS2KN)} kn`);
@@ -85,14 +86,18 @@ export function buildContext(
     const state = str(reader.get("navigation.anchor.state"));
     const maxR = num(reader.get("navigation.anchor.maxRadius"));
     const curR = num(reader.get("navigation.anchor.currentRadius"));
-    const anchored =
-      state === "on" || (maxR !== undefined && maxR > 0);
+    const anchored = state === "on" || (maxR !== undefined && maxR > 0);
     if (anchored) {
       const a: string[] = ["anchored"];
-      if (curR !== undefined) a.push(`currently ${fmt(curR, 0)} m from the anchor`);
+      if (curR !== undefined)
+        a.push(`currently ${fmt(curR, 0)} m from the anchor`);
       if (maxR !== undefined) a.push(`watch radius ${fmt(maxR, 0)} m`);
       if (curR !== undefined && maxR !== undefined) {
-        a.push(curR > maxR ? "OUTSIDE the watch circle (possible drag)" : "inside the watch circle");
+        a.push(
+          curR > maxR
+            ? "OUTSIDE the watch circle (possible drag)"
+            : "inside the watch circle",
+        );
       }
       lines.push("Anchor: " + a.join("; ") + ".");
     } else {
@@ -105,7 +110,8 @@ export function buildContext(
     const aws = num(reader.get("environment.wind.speedApparent"));
     if (aws !== undefined) env.push(`apparent wind ${fmt(aws * MS2KN)} kn`);
     const awa = num(reader.get("environment.wind.angleApparent"));
-    if (awa !== undefined) env.push(`apparent wind angle ${fmt(awa * RAD2DEG, 0)}°`);
+    if (awa !== undefined)
+      env.push(`apparent wind angle ${fmt(awa * RAD2DEG, 0)}°`);
     const tws = num(reader.get("environment.wind.speedTrue"));
     if (tws !== undefined) env.push(`true wind ${fmt(tws * MS2KN)} kn`);
     const wt = num(reader.get("environment.water.temperature"));
@@ -121,12 +127,14 @@ export function buildContext(
     const el: string[] = [];
     // Battery: report every battery bank we can find a SOC/voltage for.
     const batteries = reader.get("electrical.batteries") as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (batteries && typeof batteries === "object") {
       for (const [id, bank] of Object.entries(batteries)) {
         const b = bank as Record<string, unknown>;
-        const soc = num((b?.["capacity"] as any)?.stateOfCharge?.value ?? (b?.["capacity"] as any)?.stateOfCharge);
+        const soc = num(
+          (b?.["capacity"] as any)?.stateOfCharge?.value ??
+            (b?.["capacity"] as any)?.stateOfCharge,
+        );
         const volt = num((b?.["voltage"] as any)?.value ?? b?.["voltage"]);
         const parts: string[] = [];
         if (soc !== undefined) parts.push(`${fmt(soc * 100, 0)}%`);
@@ -140,8 +148,11 @@ export function buildContext(
       for (const [type, byId] of Object.entries(tanks)) {
         if (!byId || typeof byId !== "object") continue;
         for (const [id, t] of Object.entries(byId as Record<string, unknown>)) {
-          const lvl = num((t as any)?.currentLevel?.value ?? (t as any)?.currentLevel);
-          if (lvl !== undefined) el.push(`${type} tank ${id} ${fmt(lvl * 100, 0)}%`);
+          const lvl = num(
+            (t as any)?.currentLevel?.value ?? (t as any)?.currentLevel,
+          );
+          if (lvl !== undefined)
+            el.push(`${type} tank ${id} ${fmt(lvl * 100, 0)}%`);
         }
       }
     }

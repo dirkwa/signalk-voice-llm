@@ -62,7 +62,9 @@ export async function chat(
     return { text };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`LLM request timed out after ${cfg.timeoutMs} ms`);
+      throw new Error(`LLM request timed out after ${cfg.timeoutMs} ms`, {
+        cause: err,
+      });
     }
     throw err;
   } finally {

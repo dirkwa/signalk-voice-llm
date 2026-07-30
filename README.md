@@ -20,7 +20,7 @@ you speak  →  voice.command (SignalK)
 - **Gives the LLM live boat context** — a compact, unit-friendly snapshot of
   the vessel so it can answer questions about it. Selectable groups:
   - **Navigation** — position, speed over ground, course, heading, depth
-  - **Anchor** — anchored?, current vs. watch radius, *drag* detection
+  - **Anchor** — anchored?, current vs. watch radius, _drag_ detection
   - **Environment** — apparent/true wind, water/air temperature, pressure
   - **Electrical / tanks** — battery SOC/voltage, fuel + water levels
 - **Speaks the reply** via signalk-wyoming's `say()`, defaulting to the
@@ -44,16 +44,16 @@ you speak  →  voice.command (SignalK)
 
 In the plugin config:
 
-| Field | Notes |
-|-------|-------|
-| `llm.baseUrl` | e.g. `http://192.168.0.50:1234/v1` |
-| `llm.model` | model id as the server reports it (e.g. `qwen2.5-7b-instruct`) |
-| `llm.apiKey` | usually empty for local servers |
-| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning |
-| `systemPrompt` | how the assistant behaves (kept short — replies are spoken) |
-| `context.*` | which boat-data groups to feed the LLM |
-| `replyTargetOriginOnly` | reply only to the satellite that asked (else all) |
-| `speakErrors` | speak a short error if the LLM is unreachable |
+| Field                                         | Notes                                                          |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `llm.baseUrl`                                 | e.g. `http://192.168.0.50:1234/v1`                             |
+| `llm.model`                                   | model id as the server reports it (e.g. `qwen2.5-7b-instruct`) |
+| `llm.apiKey`                                  | usually empty for local servers                                |
+| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                    |
+| `systemPrompt`                                | how the assistant behaves (kept short — replies are spoken)    |
+| `context.*`                                   | which boat-data groups to feed the LLM                         |
+| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)              |
+| `speakErrors`                                 | speak a short error if the LLM is unreachable                  |
 
 ## Notes
 
