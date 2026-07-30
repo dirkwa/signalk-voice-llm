@@ -66,9 +66,15 @@ This repo is maintained by Dirk Wahrheit.
 ### Pre-PR checklist
 
 ```bash
-npm run build
+npm run format        # prettier --write, then eslint --fix
+npm run build:all     # ci-lint (eslint + prettier --check) then tsc
 npm pack --dry-run    # confirm the tarball contents
 ```
+
+`ci-lint` is wired into the plugin CI workflow as `format-check-command`, so
+a formatting or lint failure blocks the PR. `.gitattributes` forces LF —
+without it the Windows runner checks out CRLF and `prettier --check` reports
+every line as changed.
 
 ## Releasing
 
@@ -102,12 +108,12 @@ Constraints that have bitten this setup before:
 
 ## File layout
 
-| Path            | Purpose                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`  | Plugin entry. Config schema, PropertyValues acquisition of `say()`, `voice.command` subscription, reply orchestration. |
-| `src/llm.ts`    | OpenAI-compatible chat client. Timeout handling, no SDK dependency.                                                  |
-| `src/context.ts`| Builds the boat-data snapshot handed to the model. One function per group (navigation, anchor, environment, electrical). |
-| `app-icon.svg`  | App Store icon, referenced from `signalk.appIcon`.                                                                  |
+| Path             | Purpose                                                                                                                  |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `src/index.ts`   | Plugin entry. Config schema, PropertyValues acquisition of `say()`, `voice.command` subscription, reply orchestration.   |
+| `src/llm.ts`     | OpenAI-compatible chat client. Timeout handling, no SDK dependency.                                                      |
+| `src/context.ts` | Builds the boat-data snapshot handed to the model. One function per group (navigation, anchor, environment, electrical). |
+| `app-icon.svg`   | App Store icon, referenced from `signalk.appIcon`.                                                                       |
 
 ## Companion plugins
 

@@ -12,6 +12,11 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
+    "prettier": "prettier --write .",
+    "lint": "eslint --fix",
+    "format": "npm run prettier && npm run lint",
+    "ci-lint": "eslint && prettier --check .",
+    "build:all": "npm run ci-lint && npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -45,9 +50,14 @@
     "url": "https://github.com/dirkwa/signalk-voice-llm/issues"
   },
   "homepage": "https://github.com/dirkwa/signalk-voice-llm#readme",
-  "dependencies": {},
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
-    "typescript": "^5.5.0"
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.8.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.65.0"
   }
 }
