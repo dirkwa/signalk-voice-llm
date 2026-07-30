@@ -1,0 +1,437 @@
+// End-to-end: voice.command -> boat context -> LLM -> say().
+//
+// These drive the real plugin module against a real HTTP LLM stub. They cover
+// the happy path and, deliberately, every failure this plugin has actually
+// shipped or nearly shipped: the partial-config crash, the discarded
+// AbortError, and the reply that arrives after the plugin was stopped.
+
+import { test } from "node:test";
+import * as assert from "node:assert/strict";
+import * as path from "node:path";
+import { createMockApp, settle, startFakeLlm } from "./harness";
+
+// require() rather than import: the plugin is CommonJS
+// (module.exports = function (app) {…}), which is the shape Signal K loads.
+// A fresh require per test would be pointless — the module holds no state
+// outside the factory — but the factory itself must be called per test.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pluginFactory = require(path.join(__dirname, "..", "index.js")) as (
+  app: unknown,
+) => {
+  start(config: unknown): void;
+  stop(): void;
+  schema(): unknown;
+  id: string;
+  name: string;
+};
+
+function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
+  return {
+    llm: {
+      baseUrl,
+      model: "test-model",
+      apiKey: "",
+      temperature: 0.4,
+      maxTokens: 200,
+      timeoutMs: 5000,
+    },
+    ...over,
+  };
+}
+
+test("speaks the LLM reply back to the satellite that asked", async () => {
+  const llm = await startFakeLlm("Depth is 4.2 metres.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("what is my depth", "cockpit");
+  await settle();
+
+  assert.equal(llm.requests.length, 1, "should have asked the LLM once");
+  assert.deepEqual(mock.spoken, [
+    { text: "Depth is 4.2 metres.", targets: ["cockpit"] },
+  ]);
+
+  // The user's words must reach the model verbatim.
+  const sent = llm.requests[0]!;
+  assert.equal(sent.model, "test-model");
+  const user = sent.messages.find((m) => m.role === "user");
+  assert.equal(user?.content, "what is my depth");
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("feeds converted boat data to the model, not raw SI", async () => {
+  const llm = await startFakeLlm("Ok.");
+  const mock = createMockApp();
+
+  // Signal K is SI internally. These are the units the plugin must convert.
+  mock.selfPaths["navigation.speedOverGround"] = 5.144; // m/s -> ~10 kn
+  mock.selfPaths["navigation.headingTrue"] = Math.PI; // rad -> 180°
+  mock.selfPaths["environment.water.temperature"] = 288.15; // K -> 15°C
+  mock.selfPaths["environment.outside.pressure"] = 101300; // Pa -> 1013 hPa
+  mock.selfPaths["environment.depth.belowKeel"] = 4.2;
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("status");
+  await settle();
+
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.ok(system, "a system message should carry the boat context");
+  const ctx = system.content;
+
+  assert.match(ctx, /speed over ground 10 kn/, "m/s must become knots");
+  assert.match(ctx, /heading 180°/, "radians must become degrees");
+  assert.match(ctx, /water 15°C/, "kelvin must become celsius");
+  assert.match(ctx, /pressure 1013 hPa/, "pascals must become hPa");
+  assert.match(ctx, /depth 4.2 m/);
+
+  // Absent paths must not leak placeholders into the prompt.
+  assert.doesNotMatch(ctx, /undefined|NaN|null/);
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("start() survives a partial config (the 0.2.0 crash)", async () => {
+  const llm = await startFakeLlm("Fine.");
+
+  // 0.2.0 threw "Cannot read properties of undefined (reading 'baseUrl')"
+  // here: Signal K passes {} on first enable, before anything is saved.
+  for (const cfg of [{}, undefined, { llm: { model: "only-model" } }]) {
+    const mock = createMockApp();
+    const plugin = pluginFactory(mock.app);
+    assert.doesNotThrow(
+      () => plugin.start(cfg),
+      `start(${JSON.stringify(cfg)}) must not throw`,
+    );
+    plugin.stop();
+  }
+
+  // A partial llm block keeps the user's field and fills the rest, rather
+  // than leaving baseUrl undefined.
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  plugin.start({ llm: { baseUrl: llm.baseUrl, model: "kept" } });
+  mock.provideSay();
+  mock.sendCommand("hi");
+  await settle();
+
+  assert.equal(
+    llm.requests.length,
+    1,
+    "the merged config must still be usable",
+  );
+  assert.equal(llm.requests[0]!.model, "kept", "user's value must survive");
+  assert.equal(
+    llm.requests[0]!.max_tokens,
+    200,
+    "missing field must come from defaults",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("does not speak a reply that arrives after stop()", async () => {
+  const llm = await startFakeLlm("Too late.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("slow question");
+
+  // Stop while the request is still in flight — the user disabled the plugin
+  // mid-question. Speaking now would talk into a boat whose owner just
+  // switched the assistant off.
+  plugin.stop();
+  await settle();
+
+  assert.equal(llm.requests.length, 1, "the request had already gone out");
+  assert.deepEqual(mock.spoken, [], "but nothing may be spoken after stop()");
+
+  await llm.close();
+});
+
+test("speaks an error when the LLM is unreachable", async () => {
+  const llm = await startFakeLlm();
+  llm.setStatus(500, "boom");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl, { speakErrors: true }));
+  mock.provideSay();
+  mock.sendCommand("anything", "cockpit");
+  await settle();
+
+  assert.equal(
+    mock.spoken.length,
+    1,
+    "the skipper must not be left in silence",
+  );
+  assert.match(mock.spoken[0]!.text, /sorry/i);
+  assert.deepEqual(mock.spoken[0]!.targets, ["cockpit"]);
+  assert.ok(
+    mock.pluginErrorLog.some((m) => /500/.test(m)),
+    "and the failure must be visible in the plugin status",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("stays silent on LLM failure when speakErrors is off", async () => {
+  const llm = await startFakeLlm();
+  llm.setStatus(500, "boom");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl, { speakErrors: false }));
+  mock.provideSay();
+  mock.sendCommand("anything");
+  await settle();
+
+  assert.deepEqual(mock.spoken, []);
+  assert.ok(mock.errorLog.some((m) => /LLM failed/.test(m)));
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("a timed-out request reports the timeout and keeps the cause", async () => {
+  const llm = await startFakeLlm();
+  llm.setHang(true);
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  // A short timeout so the test doesn't sit through the 30s default.
+  plugin.start({
+    llm: {
+      baseUrl: llm.baseUrl,
+      model: "test-model",
+      apiKey: "",
+      temperature: 0.4,
+      maxTokens: 200,
+      timeoutMs: 250,
+    },
+    speakErrors: false,
+  });
+  mock.provideSay();
+  mock.sendCommand("will hang");
+  await settle(900);
+
+  assert.ok(
+    mock.errorLog.some((m) => /timed out after 250 ms/.test(m)),
+    `expected a timeout error, got: ${JSON.stringify(mock.errorLog)}`,
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("replies to all satellites when replyTargetOriginOnly is off", async () => {
+  const llm = await startFakeLlm("Broadcast.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl, { replyTargetOriginOnly: false }));
+  mock.provideSay();
+  mock.sendCommand("tell everyone", "cockpit");
+  await settle();
+
+  assert.equal(mock.spoken.length, 1);
+  assert.equal(
+    mock.spoken[0]!.targets,
+    undefined,
+    "no targets means signalk-wyoming plays it everywhere",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("survives a missing say() handle without throwing", async () => {
+  const llm = await startFakeLlm("Nobody hears this.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  // signalk-wyoming never published its API — not installed, or not started.
+  plugin.start(configFor(llm.baseUrl));
+  mock.sendCommand("hello");
+  await settle();
+
+  assert.deepEqual(mock.spoken, []);
+  assert.ok(
+    mock.errorLog.some((m) => /no say\(\) handle/.test(m)),
+    "the operator needs to be told why nothing was spoken",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("keeps the say() handle across a stop()/start() cycle", async () => {
+  const llm = await startFakeLlm("Still working.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  plugin.stop();
+
+  // A config change restarts the plugin, but PropertyValues does not reliably
+  // re-deliver wyoming's history. Dropping the handle here would silently
+  // break replies until wyoming itself restarted.
+  plugin.start(configFor(llm.baseUrl));
+  mock.sendCommand("after a config change");
+  await settle();
+
+  assert.equal(
+    mock.spoken.length,
+    1,
+    "voice replies must survive a config change",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("a rejecting say() is caught, not thrown at the server", async () => {
+  const llm = await startFakeLlm("Try to say this.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  mock.failSayWith(new Error("wyoming is stopped"));
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("hello");
+  await settle();
+
+  assert.ok(
+    mock.errorLog.some((m) => /say\(\) failed/.test(m)),
+    "the rejection must be logged, and must not escape the plugin",
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("missing subscriptionmanager is reported, not fatal", async () => {
+  const llm = await startFakeLlm();
+  const mock = createMockApp({ withSubscriptionManager: false });
+  const plugin = pluginFactory(mock.app);
+
+  assert.doesNotThrow(() => plugin.start(configFor(llm.baseUrl)));
+  assert.ok(
+    mock.errorLog.some((m) => /subscriptionmanager unavailable/.test(m)),
+  );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("missing onPropertyValues is reported, not fatal", async () => {
+  const llm = await startFakeLlm();
+  const mock = createMockApp({ withPropertyValues: false });
+  const plugin = pluginFactory(mock.app);
+
+  assert.doesNotThrow(() => plugin.start(configFor(llm.baseUrl)));
+  assert.ok(mock.errorLog.some((m) => /onPropertyValues unavailable/.test(m)));
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("sends an Authorization header only when an apiKey is set", async () => {
+  const llm = await startFakeLlm("Ok.");
+  const mock = createMockApp();
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl)); // apiKey: ""
+  mock.provideSay();
+  mock.sendCommand("no key");
+  await settle();
+  assert.equal(
+    llm.requests[0]!.authorization,
+    undefined,
+    "local servers must not get a bogus empty bearer token",
+  );
+  plugin.stop();
+
+  const mock2 = createMockApp();
+  const plugin2 = pluginFactory(mock2.app);
+  plugin2.start({
+    llm: {
+      baseUrl: llm.baseUrl,
+      model: "test-model",
+      apiKey: "secret-key",
+      temperature: 0.4,
+      maxTokens: 200,
+      timeoutMs: 5000,
+    },
+  });
+  mock2.provideSay();
+  mock2.sendCommand("with key");
+  await settle();
+  assert.equal(llm.requests[1]!.authorization, "Bearer secret-key");
+
+  // The key must never reach a log line.
+  const allLogs = [
+    ...mock2.debugLog,
+    ...mock2.errorLog,
+    ...mock2.statusLog,
+    ...mock2.pluginErrorLog,
+  ].join("\n");
+  assert.doesNotMatch(
+    allLogs,
+    /secret-key/,
+    "the api key must never be logged",
+  );
+
+  plugin2.stop();
+  await llm.close();
+});
+
+test("ignores empty and whitespace-only commands", async () => {
+  const llm = await startFakeLlm("Should not be asked.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("");
+  mock.sendCommand("   ");
+  await settle();
+
+  assert.equal(llm.requests.length, 0, "silence must not wake the LLM");
+  assert.deepEqual(mock.spoken, []);
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("exposes a config schema that matches the runtime defaults", async () => {
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  assert.equal(plugin.id, "signalk-voice-llm");
+  const schema = plugin.schema() as {
+    properties: Record<
+      string,
+      { properties?: Record<string, { default?: unknown }>; default?: unknown }
+    >;
+  };
+
+  // The schema defaults are the source the merge reads from, so a drift here
+  // is what caused the 0.2.0 crash to be invisible until runtime.
+  assert.equal(schema.properties.llm!.properties!.maxTokens!.default, 200);
+  assert.equal(schema.properties.llm!.properties!.timeoutMs!.default, 30000);
+  assert.equal(schema.properties.replyTargetOriginOnly!.default, true);
+  assert.equal(schema.properties.speakErrors!.default, true);
+});
