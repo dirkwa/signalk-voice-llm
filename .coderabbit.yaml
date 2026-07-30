@@ -194,7 +194,14 @@ reviews:
         - **`repository.url` must match** the GitHub repo signing the
           attestation, or provenance fails 422.
         - Version bumps belong in a dedicated release PR, never folded into a
-          feature or fix PR.
+          feature or fix PR. A `chore(release): X.Y.Z` PR must contain
+          **only** the bump — package.json, package-lock.json, and a
+          changelog entry if one exists. If a release PR touches `src/`, a
+          workflow, or config, flag it and say the change should be split
+          into its own PR that merges first. This matters because the tag is
+          the publish trigger, and because review is skipped on
+          `chore(release):` titles — so code smuggled into a release PR
+          bypasses review entirely.
 
         ## Echo comments
 
@@ -223,6 +230,20 @@ reviews:
         ## Commit / PR conventions
 
         - Branch names use **hyphens**, never slashes.
+        - **Angular conventional commits**: `<type>(<scope>): <subject>`.
+          Subject ≤ 50 chars, imperative mood, no trailing period, lower-case
+          after the colon. Types: feat, fix, docs, refactor, test, build, ci,
+          chore. Scope is optional — omit it rather than inventing a vague
+          one. Breaking changes use `!` before the colon plus a
+          `BREAKING CHANGE:` footer.
+        - **This applies to the PR title**, which becomes the squash-merge
+          commit subject. Flag a PR title that isn't in this form and suggest
+          a concrete replacement — e.g.
+          "Add eslint and prettier" → `ci: gate PRs on eslint and prettier`.
+          Do not flag individual commits predating the convention.
+        - Commit bodies explain *why*, wrapped at 72 chars — the failure being
+          fixed, the constraint that forced the approach, what was verified.
+          The diff already shows what changed.
         - One logical change per commit and per PR.
         - **No AI attribution** in commits, PR bodies, or code. No
           `Co-Authored-By` trailers, no mention of Claude or AI.
