@@ -138,7 +138,8 @@ module.exports = function (app: App) {
             apiKey: {
               type: "string",
               title: "API key",
-              description: "Usually empty for local servers (LM Studio/Ollama).",
+              description:
+                "Usually empty for local servers (LM Studio/Ollama).",
               default: SCHEMA_DEFAULTS.llm.apiKey,
             },
             temperature: {
@@ -161,17 +162,34 @@ module.exports = function (app: App) {
         systemPrompt: {
           type: "string",
           title: "System prompt",
-          description: "How the assistant should behave. Keep replies short — they are spoken.",
+          description:
+            "How the assistant should behave. Keep replies short — they are spoken.",
           default: SCHEMA_DEFAULTS.systemPrompt,
         },
         context: {
           type: "object",
           title: "Boat data the assistant can use",
           properties: {
-            navigation: { type: "boolean", title: "Navigation (position, speed, course, depth)", default: SCHEMA_DEFAULTS.context.navigation },
-            anchor: { type: "boolean", title: "Anchor (state, radius, drag)", default: SCHEMA_DEFAULTS.context.anchor },
-            environment: { type: "boolean", title: "Environment / wind", default: SCHEMA_DEFAULTS.context.environment },
-            electrical: { type: "boolean", title: "Electrical / tanks", default: SCHEMA_DEFAULTS.context.electrical },
+            navigation: {
+              type: "boolean",
+              title: "Navigation (position, speed, course, depth)",
+              default: SCHEMA_DEFAULTS.context.navigation,
+            },
+            anchor: {
+              type: "boolean",
+              title: "Anchor (state, radius, drag)",
+              default: SCHEMA_DEFAULTS.context.anchor,
+            },
+            environment: {
+              type: "boolean",
+              title: "Environment / wind",
+              default: SCHEMA_DEFAULTS.context.environment,
+            },
+            electrical: {
+              type: "boolean",
+              title: "Electrical / tanks",
+              default: SCHEMA_DEFAULTS.context.electrical,
+            },
           },
         },
         replyTargetOriginOnly: {
@@ -183,7 +201,8 @@ module.exports = function (app: App) {
         speakErrors: {
           type: "boolean",
           title: "Speak errors aloud",
-          description: "If the LLM is unreachable, say a short spoken error instead of staying silent.",
+          description:
+            "If the LLM is unreachable, say a short spoken error instead of staying silent.",
           default: SCHEMA_DEFAULTS.speakErrors,
         },
       },
@@ -274,6 +293,16 @@ module.exports = function (app: App) {
           return;
         }
 
+        // The LLM call above can take many seconds. If the plugin was stopped
+        // while it was in flight, drop the reply rather than speaking into a
+        // boat whose owner just disabled the assistant.
+        if (!running) {
+          app.debug(
+            "dropping reply — plugin stopped while the LLM was working",
+          );
+          return;
+        }
+
         app.debug(`LLM reply: "${reply}"`);
         app.setPluginStatus?.(`spoke: "${reply.slice(0, 40)}"`);
 
@@ -294,9 +323,7 @@ module.exports = function (app: App) {
       if (app.subscriptionmanager) {
         const subscription = {
           context: "vessels.self",
-          subscribe: [
-            { path: "voice.command", policy: "instant" },
-          ],
+          subscribe: [{ path: "voice.command", policy: "instant" }],
         };
         app.subscriptionmanager.subscribe(
           subscription,
@@ -314,7 +341,9 @@ module.exports = function (app: App) {
         );
         app.debug("subscribed to voice.command");
       } else {
-        app.error("subscriptionmanager unavailable — cannot read voice.command");
+        app.error(
+          "subscriptionmanager unavailable — cannot read voice.command",
+        );
       }
 
       refreshStatus();
