@@ -134,9 +134,33 @@ subjects don't break changelog generation.
 
 ```bash
 npm run format        # prettier --write, then eslint --fix
-npm run build:all     # ci-lint (eslint + prettier --check) then tsc
+npm run build:all     # ci-lint, then tsc, then the test suite
 npm pack --dry-run    # confirm the tarball contents
 ```
+
+## Tests
+
+`src/test/` holds an end-to-end suite (`npm test`, run via `node --test`
+against the compiled output). It drives the **real** plugin module the way
+Signal K does — factory, `start()`, a `voice.command` delta, the spoken reply
+— against a stub LLM served over loopback HTTP. Nothing in the plugin's own
+code path is mocked: `fetch` really goes over TCP, and the PropertyValues and
+subscriptionmanager plumbing runs as written.
+
+Two harness details are load-bearing:
+
+- The stub server and its sockets are `unref()`d. A failing assertion aborts
+  the test before its `close()` call, and an open listener would then hold
+  Node's event loop open forever — turning a test failure into a CI hang,
+  which is far worse to diagnose than a red X.
+- The `files` allowlist in package.json excludes the compiled tests. Allowing
+  the whole build directory ships them to users, so re-check the pack dry-run
+  after changing what the build emits.
+
+New tests should assert against **observable behaviour** — what was spoken,
+what reached the LLM — rather than internal state. Every regression this
+plugin has shipped has a test named after it; keep that habit, and prefer
+adding to the suite over adding a claim to a PR description.
 
 `ci-lint` is wired into the plugin CI workflow as `format-check-command`, so
 a formatting or lint failure blocks the PR. `.gitattributes` forces LF —
