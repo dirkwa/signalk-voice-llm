@@ -1,0 +1,107 @@
+# signalk-voice-llm
+
+Signal K plugin that answers spoken boat questions with an LLM. It subscribes
+to `voice.command`, builds a compact snapshot of live boat data, asks an
+OpenAI-compatible chat endpoint, and speaks the reply back through
+signalk-wyoming's `say()`.
+
+```
+voice.command (signalk-wyoming)  →  buildContext()  →  chat()  →  say()
+```
+
+## Architecture rules you must keep in mind
+
+- **signalk-wyoming is a hard runtime dependency, declared only in
+  `signalk.requires`.** It supplies both halves this plugin needs: the
+  `voice.command` path and the `say()` function. There is deliberately no npm
+  dependency and no `peerDependencies` entry — the handle arrives at runtime
+  over PropertyValues, not through the module graph.
+- **`say()` is acquired via PropertyValues, not imported.**
+  `app.onPropertyValues("signalk-wyoming.api", …)` replays history
+  newest-last; walk it backwards and take the first entry carrying a callable
+  `say`. Never assume the handle exists at `start()` time — wyoming may not
+  have loaded yet.
+- **`stop()` deliberately does not clear `say`.** Signal K keeps the module
+  loaded across a stop()/start() cycle, but PropertyValues does not reliably
+  re-deliver history to the re-subscribing plugin. Dropping the handle would
+  silently break voice replies after any config change until wyoming itself
+  restarts. The facade is stable across wyoming restarts and rejects cleanly
+  if wyoming is stopped, so holding a stale handle is safe. This is
+  counter-intuitive on purpose — do not "fix" it.
+- **Never crash signalk-server.** Every failure path (LLM unreachable, no
+  `say()` handle, missing `subscriptionmanager`) calls `app.error(...)` or
+  `app.setPluginError(...)` and returns. Never throw out of `start()` — a
+  thrown plugin can take down the whole server.
+- **Replies are spoken, not read.** The system prompt constrains the model to
+  one or two short sentences, no markdown, no lists, no emoji. Any change that
+  invites longer or formatted output is a regression — TTS reads punctuation
+  and markup aloud.
+- **Speech-to-text input is lossy.** The prompt tells the model its input came
+  from STT and may be misheard, so it should interpret nautically ("debt" →
+  "depth"). Keep that framing.
+- **The LLM endpoint is plain HTTP.** This plugin spawns nothing and manages
+  no container. It is not a signalk-container consumer — do not add one.
+
+## Workflow Conventions
+
+This repo is maintained by Dirk Wahrheit.
+
+- Branch names use **hyphens**, never slashes.
+- One logical change per commit and per PR.
+- No `Co-Authored-By` lines and no AI-attribution of any kind, in commits, PR
+  bodies, or code.
+- Never commit directly to `main`. Every change goes through a PR.
+- Version bumps live in their own release PR, and only when explicitly asked.
+- PR descriptions: no checkboxes. "Tested" lists what actually ran, not what
+  was planned.
+
+### Pre-PR checklist
+
+```bash
+npm run build
+npm pack --dry-run    # confirm the tarball contents
+```
+
+## Releasing
+
+Publishing is driven entirely by tags — never by hand.
+
+1. Merge a release PR that bumps `version` in `package.json` (and the two
+   entries in `package-lock.json`).
+2. Push a matching `vX.Y.Z` tag to `main`.
+3. `.github/workflows/publish.yml` creates the GitHub Release and runs
+   `npm publish --provenance` using npm's OIDC trusted publisher — there is no
+   `NPM_TOKEN` secret.
+
+Constraints that have bitten this setup before:
+
+- **npm ≥ 11 is required** for the OIDC token exchange. The workflow pins Node
+  24 to get it; older Node ships npm 10.x, which silently skips the exchange
+  and fails with a 404.
+- **`repository.url` must match the GitHub repo** signing the attestation, or
+  provenance fails with a 422.
+- Tags matching `*-beta.*` / `*-rc.*` publish under the `beta` dist-tag.
+
+## TypeScript
+
+- CommonJS (`module.exports = function (app) {…}`) — this is the shape Signal K
+  loads. Do not convert to ESM without changing how the server loads it.
+- `strict` is on. Prefer `unknown` plus narrowing over `any`; the remaining
+  `any` uses sit on Signal K's own delta/subscription types, which are
+  untyped upstream.
+- `files` in package.json is an allowlist. `dist/`, the icon, README, and
+  LICENSE ship; `src/` and `tsconfig.json` do not.
+
+## File layout
+
+| Path            | Purpose                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `src/index.ts`  | Plugin entry. Config schema, PropertyValues acquisition of `say()`, `voice.command` subscription, reply orchestration. |
+| `src/llm.ts`    | OpenAI-compatible chat client. Timeout handling, no SDK dependency.                                                  |
+| `src/context.ts`| Builds the boat-data snapshot handed to the model. One function per group (navigation, anchor, environment, electrical). |
+| `app-icon.svg`  | App Store icon, referenced from `signalk.appIcon`.                                                                  |
+
+## Companion plugins
+
+- `signalk-wyoming` — **required**. Provides `voice.command` and `say()`.
+  Declared in `signalk.requires`; see the coupling rules above.

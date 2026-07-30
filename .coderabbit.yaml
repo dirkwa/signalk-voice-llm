@@ -1,0 +1,223 @@
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - 'chore(release):'
+      - 'chore(deps):'
+      - 'chore(deps-dev):'
+      - 'chore(bump):'
+      - 'Release '
+      - '[skip review]'
+      - 'WIP'
+    ignore_usernames:
+      - 'release-please[bot]'
+      - 'renovate[bot]'
+      - 'dependabot[bot]'
+      - 'github-actions[bot]'
+
+  path_filters:
+    - '!**/package-lock.json'
+    - '!**/yarn.lock'
+    - '!**/pnpm-lock.yaml'
+    - '!**/*.min.js'
+    - '!**/*.min.css'
+    - '!**/dist/**'
+    - '!**/build/**'
+    - '!**/node_modules/**'
+    - '!**/cr-review*.txt'
+
+  high_level_summary_instructions: |
+    Write summaries in present tense. Describe what the code does, not what
+    it did. Skip filler like "This PR" — go straight to the change.
+
+  path_instructions:
+    - path: '**/*'
+      instructions: |
+        ## Scope
+
+        Focus on files changed since `main`. Think about how changes interact
+        with the rest of the voice stack, not just the diff in isolation.
+
+        signalk-voice-llm is a **Signal K plugin that answers spoken boat
+        questions with an LLM**. It subscribes to the `voice.command` path
+        published by
+        [signalk-wyoming](https://github.com/hoeken/signalk-wyoming), builds a
+        compact snapshot of live boat data, asks an OpenAI-compatible chat
+        endpoint (LM Studio, Ollama, llama.cpp, …), and speaks the reply back
+        through signalk-wyoming's `say()`.
+
+        ```
+        voice.command  →  buildContext()  →  chat()  →  say()
+        ```
+
+        There is no webapp, no container, and no server-side UI. The plugin
+        runs entirely inside the signalk-server process.
+
+        ## Never crash signalk-server
+
+        On any failure — LLM unreachable, no `say()` handle yet, missing
+        `subscriptionmanager`, malformed delta — the plugin must call
+        `app.error(...)` / `app.setPluginError(...)` and return. **Never throw
+        out of `start()`**; a thrown plugin can take down the whole Signal K
+        server. Flag any `throw` on a plugin lifecycle path, and any unawaited
+        promise rejection that could surface as an unhandled rejection.
+
+        ## say() acquisition is deliberately defensive
+
+        The `say()` handle comes from signalk-wyoming over PropertyValues, not
+        from an import:
+
+        - `app.onPropertyValues("signalk-wyoming.api", …)` replays history
+          **newest-last**. The callback walks the array backwards and takes the
+          first entry with a callable `say`. Flag any change that reads only
+          `history[0]`, assumes a single emission, or assumes the array is
+          non-empty.
+        - The handle may never arrive (wyoming not installed / not started).
+          Every call site must null-check `say` before invoking it.
+        - `app.onPropertyValues` itself may be absent on older servers — the
+          `typeof === "function"` guard is intentional.
+
+        ## stop() must NOT clear the say handle
+
+        `stop()` deliberately leaves `say` populated. Signal K keeps the module
+        loaded across a stop()/start() cycle, but PropertyValues does not
+        reliably re-deliver `signalk-wyoming.api`'s history to the
+        re-subscribing plugin. Clearing it would silently break voice replies
+        after any config change until wyoming itself restarts. The facade is
+        stable across wyoming restarts and rejects cleanly if wyoming is
+        stopped, so a stale handle fails safely.
+
+        **Do not flag this as a leak or as missing cleanup.** If a PR adds
+        `say = null` to `stop()`, flag *that* — it's a regression, and the
+        explanatory comment above it should not be removed.
+
+        ## Loose coupling to signalk-wyoming
+
+        - signalk-wyoming is declared in `signalk.requires` **only**. Flag any
+          PR adding it to `dependencies` or `peerDependencies` — the handle
+          arrives at runtime over PropertyValues, not through the module graph.
+        - Never `import` from signalk-wyoming. The local `SayFn` type is a
+          hand-rolled mirror of its API surface; that is intentional.
+
+        ## Replies are spoken, not read
+
+        The system prompt constrains the model to one or two short sentences,
+        no markdown, no lists, no emoji, nautical units. TTS reads punctuation
+        and markup aloud, so formatting is actively harmful.
+
+        Flag changes that:
+
+        - Invite longer or formatted replies (raising `maxTokens` sharply,
+          removing the brevity/no-markdown constraints).
+        - Drop the framing that input came from **speech-to-text and may be
+          misheard**, and should be interpreted nautically ("debt" → "depth").
+
+        ## Boat context
+
+        `src/context.ts` builds the data snapshot handed to the model. Watch
+        for:
+
+        - **Unit errors.** Signal K is SI internally — position in degrees,
+          speed in m/s, angles in radians, temperature in kelvin, pressure in
+          pascals. Any value shown to the model must be converted (knots,
+          degrees, celsius) or explicitly labelled. A missing or doubled
+          conversion is a real bug; check the arithmetic, don't assume.
+        - **Missing-data handling.** `getSelfPath()` returns `undefined` for
+          paths the boat doesn't publish. Every read must tolerate that
+          without emitting `undefined`, `NaN`, or `null` into the prompt —
+          omit the line instead.
+        - **Prompt size.** The snapshot is prepended to every request. Flag
+          changes that make it grow without bound.
+        - Each context group (navigation, anchor, environment, electrical) is
+          independently toggleable and must degrade gracefully when off.
+
+        ## LLM client
+
+        `src/llm.ts` is a hand-rolled OpenAI-compatible client — no SDK
+        dependency, deliberately. Check:
+
+        - The request has a **timeout** and the abort path is wired up. A
+          hung LLM must not wedge the plugin forever.
+        - Non-2xx responses and malformed JSON are handled, not assumed away.
+        - `apiKey` is optional (local servers usually need none) and must
+          never be logged. Flag any `app.debug`/`app.error` that could print
+          the key or the full config object.
+
+        ## TypeScript
+
+        - **CommonJS** (`module.exports = function (app) {…}`) — this is the
+          shape Signal K loads. Do not suggest converting to ESM.
+        - `strict` is on. Prefer `unknown` plus narrowing over `any`. The
+          remaining `any` uses sit on Signal K's own delta/subscription types,
+          which are untyped upstream — don't flag those specifically, but do
+          flag *new* `any` in this repo's own code.
+        - `files` in package.json is an allowlist: `dist/`, the icon, README,
+          and LICENSE ship — `src/` and `tsconfig.json` must not. Flag changes
+          that add a new shipped asset without adding it to `files`.
+
+        ## Release / packaging
+
+        Publishing is tag-driven via `.github/workflows/publish.yml`, using
+        npm's OIDC trusted publisher (no `NPM_TOKEN` secret). Constraints that
+        have broken this before:
+
+        - **npm ≥ 11** is required for the OIDC token exchange; the workflow
+          pins Node 24 to get it. Flag any change lowering the Node version on
+          the publish job.
+        - **`repository.url` must match** the GitHub repo signing the
+          attestation, or provenance fails 422.
+        - Version bumps belong in a dedicated release PR, never folded into a
+          feature or fix PR.
+
+        ## Echo comments
+
+        Flag any comment that merely restates the code:
+
+        - `// Subscribe to voice.command` above `subscriptionmanager.subscribe(...)`
+        - `// Call the LLM` above `await chat(...)`
+
+        Replace with comments explaining *why*, not *what*. Or delete. The
+        existing comments on the `stop()` handle-retention and the
+        PropertyValues history ordering are load-bearing — they explain
+        non-obvious behavior and should stay.
+
+        ## Documentation drift risk
+
+        Flag any `.md` file that contains:
+
+        - Specific code snippets, function signatures, or config values likely
+          to fall out of sync as the code evolves.
+        - Step-by-step build instructions that duplicate the code itself.
+        - Implementation status or progress markers ("currently implemented as
+          X"). Build narratives belong in PR descriptions, not repo docs.
+
+        Architecture decisions and conceptual rationale are fine.
+
+        ## Commit / PR conventions
+
+        - Branch names use **hyphens**, never slashes.
+        - One logical change per commit and per PR.
+        - **No AI attribution** in commits, PR bodies, or code. No
+          `Co-Authored-By` trailers, no mention of Claude or AI.
+        - PR descriptions: no checkboxes. "Tested" lists what was actually
+          verified, not what's planned.
+
+        ## What NOT to flag
+
+        These are intentional:
+
+        - `stop()` not clearing the `say` handle — see above; this is
+          load-bearing, not a leak.
+        - `signalk.requires: ['signalk-wyoming']` with no matching npm
+          dependency — loose coupling is required.
+        - The hand-rolled `SayFn` / `App` interfaces mirroring Signal K and
+          signalk-wyoming API surfaces rather than importing types.
+        - The hand-rolled LLM client instead of the OpenAI SDK.
+        - CommonJS rather than ESM.
+        - `any` on Signal K's delta and subscription callback parameters —
+          upstream provides no types for these.
