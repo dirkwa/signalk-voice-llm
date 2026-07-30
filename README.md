@@ -31,7 +31,10 @@ you speak  →  voice.command (SignalK)
 
 ## Requirements
 
-- **signalk-wyoming** running (provides `voice.command` + the `say()` API).
+- **[signalk-wyoming](https://www.npmjs.com/package/signalk-wyoming)** running —
+  it provides both halves this plugin depends on: the `voice.command` path and
+  the `say()` API. Install it from the Signal K App Store (it is declared as a
+  `requires` dependency, so the App Store will flag it if missing).
 - An **OpenAI-compatible** chat endpoint. Examples:
   - **LM Studio** — Developer → Start Server; `http://<host>:1234/v1`
   - **Ollama** — `http://<host>:11434/v1`

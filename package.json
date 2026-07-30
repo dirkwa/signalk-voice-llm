@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "description": "Answer boat voice commands with a local or remote LLM: subscribes to voice.command (from signalk-wyoming), asks an OpenAI-compatible LLM (LM Studio, Ollama, etc.), and speaks the reply back via say().",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "app-icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
@@ -18,16 +24,27 @@
     "lm-studio",
     "ollama"
   ],
+  "signalk": {
+    "displayName": "Voice LLM Assistant",
+    "appIcon": "./app-icon.svg",
+    "requires": [
+      "signalk-wyoming"
+    ]
+  },
   "signalk-plugin-enabled-by-default": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
-  "author": "dirkwa",
+  "author": "Dirk Wahrheit <dirkwahrheit@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dirkwa/signalk-voice-llm.git"
+    "url": "git+https://github.com/dirkwa/signalk-voice-llm.git"
   },
+  "bugs": {
+    "url": "https://github.com/dirkwa/signalk-voice-llm/issues"
+  },
+  "homepage": "https://github.com/dirkwa/signalk-voice-llm#readme",
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.0.0",
