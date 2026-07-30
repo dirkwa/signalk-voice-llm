@@ -153,8 +153,9 @@ Two harness details are load-bearing:
   the test before its `close()` call, and an open listener would then hold
   Node's event loop open forever — turning a test failure into a CI hang,
   which is far worse to diagnose than a red X.
-- `!dist/test` in the `files` allowlist keeps the compiled tests out of the
-  published tarball. `files: ["dist"]` alone ships them.
+- The `files` allowlist in package.json excludes the compiled tests. Allowing
+  the whole build directory ships them to users, so re-check the pack dry-run
+  after changing what the build emits.
 
 New tests should assert against **observable behaviour** — what was spoken,
 what reached the LLM — rather than internal state. Every regression this

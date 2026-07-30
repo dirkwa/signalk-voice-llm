@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
-import { createMockApp, settle, startFakeLlm } from "./harness";
+import { createMockApp, settle, startFakeLlm, waitFor } from "./harness";
 
 // require() rather than import: the plugin is CommonJS
 // (module.exports = function (app) {…}), which is the shape Signal K loads.
@@ -47,7 +47,7 @@ test("speaks the LLM reply back to the satellite that asked", async () => {
   plugin.start(configFor(llm.baseUrl));
   mock.provideSay();
   mock.sendCommand("what is my depth", "cockpit");
-  await settle();
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
 
   assert.equal(llm.requests.length, 1, "should have asked the LLM once");
   assert.deepEqual(mock.spoken, [
@@ -79,7 +79,7 @@ test("feeds converted boat data to the model, not raw SI", async () => {
   plugin.start(configFor(llm.baseUrl));
   mock.provideSay();
   mock.sendCommand("status");
-  await settle();
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
   assert.ok(system, "a system message should carry the boat context");
@@ -120,7 +120,7 @@ test("start() survives a partial config (the 0.2.0 crash)", async () => {
   plugin.start({ llm: { baseUrl: llm.baseUrl, model: "kept" } });
   mock.provideSay();
   mock.sendCommand("hi");
-  await settle();
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
   assert.equal(
     llm.requests.length,
@@ -151,10 +151,17 @@ test("does not speak a reply that arrives after stop()", async () => {
   // mid-question. Speaking now would talk into a boat whose owner just
   // switched the assistant off.
   plugin.stop();
+
+  // Wait for the request to actually reach the stub before judging the
+  // silence, otherwise this passes for the wrong reason on a slow runner:
+  // nothing spoken merely because nothing had happened yet.
+  await waitFor(
+    () => llm.requests.length === 1,
+    "the request should still have gone out before stop() took effect",
+  );
   await settle();
 
-  assert.equal(llm.requests.length, 1, "the request had already gone out");
-  assert.deepEqual(mock.spoken, [], "but nothing may be spoken after stop()");
+  assert.deepEqual(mock.spoken, [], "nothing may be spoken after stop()");
 
   await llm.close();
 });
@@ -168,7 +175,7 @@ test("speaks an error when the LLM is unreachable", async () => {
   plugin.start(configFor(llm.baseUrl, { speakErrors: true }));
   mock.provideSay();
   mock.sendCommand("anything", "cockpit");
-  await settle();
+  await waitFor(() => mock.spoken.length > 0, "no spoken error");
 
   assert.equal(
     mock.spoken.length,
@@ -195,6 +202,10 @@ test("stays silent on LLM failure when speakErrors is off", async () => {
   plugin.start(configFor(llm.baseUrl, { speakErrors: false }));
   mock.provideSay();
   mock.sendCommand("anything");
+  await waitFor(
+    () => mock.errorLog.some((m) => /LLM failed/.test(m)),
+    "the LLM failure was never logged",
+  );
   await settle();
 
   assert.deepEqual(mock.spoken, []);
@@ -224,7 +235,10 @@ test("a timed-out request reports the timeout and keeps the cause", async () => 
   });
   mock.provideSay();
   mock.sendCommand("will hang");
-  await settle(900);
+  await waitFor(
+    () => mock.errorLog.some((m) => /timed out/.test(m)),
+    "the timeout was never reported",
+  );
 
   assert.ok(
     mock.errorLog.some((m) => /timed out after 250 ms/.test(m)),
@@ -243,7 +257,7 @@ test("replies to all satellites when replyTargetOriginOnly is off", async () => 
   plugin.start(configFor(llm.baseUrl, { replyTargetOriginOnly: false }));
   mock.provideSay();
   mock.sendCommand("tell everyone", "cockpit");
-  await settle();
+  await waitFor(() => mock.spoken.length > 0, "no reply was spoken");
 
   assert.equal(mock.spoken.length, 1);
   assert.equal(
@@ -264,13 +278,39 @@ test("survives a missing say() handle without throwing", async () => {
   // signalk-wyoming never published its API — not installed, or not started.
   plugin.start(configFor(llm.baseUrl));
   mock.sendCommand("hello");
-  await settle();
+  await waitFor(
+    () => mock.errorLog.some((m) => /no say\(\) handle/.test(m)),
+    "the missing handle was never reported",
+  );
 
   assert.deepEqual(mock.spoken, []);
   assert.ok(
     mock.errorLog.some((m) => /no say\(\) handle/.test(m)),
     "the operator needs to be told why nothing was spoken",
   );
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("finds say() when newer PropertyValues entries lack it", async () => {
+  const llm = await startFakeLlm("Found it anyway.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl));
+  // wyoming re-emits its API without a say handle — the newest entries are
+  // sayless, so the plugin must walk backwards to the one that has it.
+  // Reading only the last entry (or only history[0]) would strand the plugin
+  // with no way to speak.
+  mock.provideSay({ sayless: 2 });
+  mock.sendCommand("still there?");
+  await waitFor(
+    () => mock.spoken.length > 0,
+    "the backward walk failed to find the say handle",
+  );
+
+  assert.equal(mock.spoken[0]!.text, "Found it anyway.");
 
   plugin.stop();
   await llm.close();
@@ -290,7 +330,7 @@ test("keeps the say() handle across a stop()/start() cycle", async () => {
   // break replies until wyoming itself restarted.
   plugin.start(configFor(llm.baseUrl));
   mock.sendCommand("after a config change");
-  await settle();
+  await waitFor(() => mock.spoken.length > 0, "reply lost after restart");
 
   assert.equal(
     mock.spoken.length,
@@ -311,7 +351,10 @@ test("a rejecting say() is caught, not thrown at the server", async () => {
   plugin.start(configFor(llm.baseUrl));
   mock.provideSay();
   mock.sendCommand("hello");
-  await settle();
+  await waitFor(
+    () => mock.errorLog.some((m) => /say\(\) failed/.test(m)),
+    "the say() rejection was never logged",
+  );
 
   assert.ok(
     mock.errorLog.some((m) => /say\(\) failed/.test(m)),
@@ -356,7 +399,7 @@ test("sends an Authorization header only when an apiKey is set", async () => {
   plugin.start(configFor(llm.baseUrl)); // apiKey: ""
   mock.provideSay();
   mock.sendCommand("no key");
-  await settle();
+  await waitFor(() => llm.requests.length > 0, "no request sent");
   assert.equal(
     llm.requests[0]!.authorization,
     undefined,
@@ -378,7 +421,7 @@ test("sends an Authorization header only when an apiKey is set", async () => {
   });
   mock2.provideSay();
   mock2.sendCommand("with key");
-  await settle();
+  await waitFor(() => llm.requests.length > 1, "second request never sent");
   assert.equal(llm.requests[1]!.authorization, "Bearer secret-key");
 
   // The key must never reach a log line.

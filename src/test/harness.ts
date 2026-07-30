@@ -131,8 +131,14 @@ export interface MockApp {
   pluginErrorLog: string[];
   /** Publish a voice.command, as signalk-wyoming would. */
   sendCommand(text: string, satellite?: string): void;
-  /** Emit the signalk-wyoming.api PropertyValue carrying say(). */
-  provideSay(): void;
+  /**
+   * Emit the signalk-wyoming.api PropertyValue carrying say().
+   *
+   * `sayless` appends that many entries without a say handle *after* the one
+   * that has it, so the plugin has to walk backwards past them. Default 0
+   * puts the handle last, which is the common case.
+   */
+  provideSay(opts?: { sayless?: number }): void;
   /** Make say() reject, as a stopped wyoming would. */
   failSayWith(err: Error): void;
   /** Boat data returned by getSelfPath. */
@@ -210,12 +216,21 @@ export function createMockApp(
         ],
       });
     },
-    provideSay() {
+    provideSay(opts = {}) {
       if (!propertyCb)
         throw new Error("plugin never registered for PropertyValues");
-      // Mirror the real shape: history is an array, newest last, and earlier
-      // entries may carry no say handle at all.
-      propertyCb([{ value: { version: 1 } }, { value: { version: 2, say } }]);
+      // Mirror the real shape: history is an array, newest last, and entries
+      // may carry no say handle at all.
+      const history: unknown[] = [
+        { value: { version: 1 } },
+        { value: { version: 2, say } },
+      ];
+      // Trailing sayless emissions force the plugin to walk backwards rather
+      // than reading the newest entry and giving up.
+      for (let i = 0; i < (opts.sayless ?? 0); i++) {
+        history.push({ value: { version: 3 + i } });
+      }
+      propertyCb(history);
     },
     failSayWith(err) {
       sayError = err;
@@ -223,7 +238,40 @@ export function createMockApp(
   };
 }
 
-/** Let queued promise callbacks run — the delta handler is fire-and-forget. */
-export async function settle(ms = 60): Promise<void> {
+/**
+ * Wait until `condition` holds, polling briefly.
+ *
+ * The delta handler is fire-and-forget, so tests have to wait for an async
+ * chain (fetch over loopback, then say()) with no handle to await. A fixed
+ * sleep is the obvious approach and is wrong: it either races a slow runner
+ * or pads every test with a delay it rarely needs. This CI failed exactly
+ * that way on Node 24 — one request had not completed within 60 ms on a cold
+ * runner, so the suite was flaky rather than broken.
+ *
+ * `timeoutMs` is a ceiling, not a delay: a passing assertion returns as soon
+ * as the condition is met, usually in a millisecond or two.
+ */
+export async function waitFor(
+  condition: () => boolean,
+  message = "condition never became true",
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`waitFor timed out after ${timeoutMs} ms: ${message}`);
+}
+
+/**
+ * Let the in-flight delta chain run to completion.
+ *
+ * Used where a test asserts that something did NOT happen (no reply spoken,
+ * no request sent). There is no condition to poll for an absence, so this
+ * yields enough turns for any pending work to land. Keep it well above the
+ * loopback round-trip time.
+ */
+export async function settle(ms = 250): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
