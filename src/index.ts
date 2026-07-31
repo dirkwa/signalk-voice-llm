@@ -1,5 +1,6 @@
 import { chat, ChatMessage, LlmConfig } from "./llm";
 import { buildContext, ContextGroups, SelfPathReader } from "./context";
+import { fetchWeather, WeatherConfig, WEATHER_DEFAULTS } from "./weather";
 
 // ---------------------------------------------------------------------------
 // SignalK plugin: voice.command -> LLM -> say()
@@ -53,6 +54,11 @@ interface Config {
   };
   systemPrompt: string;
   context: ContextGroups;
+  // Live weather forecast (Open-Meteo) for the boat's position — the local LLM
+  // has no internet, so this fetches the forecast and feeds it as context.
+  weather: {
+    enabled: boolean;
+  } & WeatherConfig;
   replyTargetOriginOnly: boolean;
   speakErrors: boolean;
 }
@@ -86,6 +92,10 @@ const SCHEMA_DEFAULTS: Config = {
     environment: true,
     electrical: true,
   },
+  weather: {
+    enabled: true,
+    ...WEATHER_DEFAULTS,
+  },
   replyTargetOriginOnly: true,
   speakErrors: true,
 };
@@ -100,8 +110,15 @@ function withDefaults(incoming: Partial<Config> | undefined): Config {
     ...cfg,
     llm: { ...SCHEMA_DEFAULTS.llm, ...(cfg.llm ?? {}) },
     context: { ...SCHEMA_DEFAULTS.context, ...(cfg.context ?? {}) },
+    weather: { ...SCHEMA_DEFAULTS.weather, ...(cfg.weather ?? {}) },
   };
 }
+
+// The weather fetch defaults to the global fetch. Tests override it to point
+// the Open-Meteo call at a loopback stub (the URL is otherwise hard-coded to
+// api.open-meteo.com), mirroring how the LLM client is exercised over real TCP.
+let weatherFetch: typeof fetch = ((...args: Parameters<typeof fetch>) =>
+  fetch(...args)) as typeof fetch;
 
 module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
@@ -192,6 +209,37 @@ module.exports = function (app: App) {
             },
           },
         },
+        weather: {
+          type: "object",
+          title: "Weather forecast (Open-Meteo, no API key)",
+          description:
+            "Fetches a live forecast for the boat's position so the assistant can answer weather questions — the local LLM has no internet on its own.",
+          properties: {
+            enabled: {
+              type: "boolean",
+              title: "Enable weather forecast",
+              default: SCHEMA_DEFAULTS.weather.enabled,
+            },
+            forecastHours: {
+              type: "number",
+              title: "Forecast window (hours)",
+              description: "How far ahead to summarise (1–48).",
+              default: SCHEMA_DEFAULTS.weather.forecastHours,
+            },
+            timeoutMs: {
+              type: "number",
+              title: "Forecast request timeout (ms)",
+              default: SCHEMA_DEFAULTS.weather.timeoutMs,
+            },
+            cacheMs: {
+              type: "number",
+              title: "Forecast cache (ms)",
+              description:
+                "Reuse the last forecast for this long instead of refetching. 0 disables.",
+              default: SCHEMA_DEFAULTS.weather.cacheMs,
+            },
+          },
+        },
         replyTargetOriginOnly: {
           type: "boolean",
           title: "Reply only to the satellite that asked",
@@ -269,9 +317,38 @@ module.exports = function (app: App) {
         };
 
         const boat = buildContext(reader, config.context);
+
+        // Fetch a live forecast for the current position (best-effort — never
+        // throws, returns "" when off / unavailable). The local LLM can't
+        // reach the internet, so this is how it answers weather questions.
+        let weather = "";
+        if (config.weather.enabled) {
+          const pos = app.getSelfPath("navigation.position") as
+            | { value?: { latitude?: number; longitude?: number } }
+            | { latitude?: number; longitude?: number }
+            | undefined;
+          const p =
+            pos && "value" in pos
+              ? (pos.value ?? undefined)
+              : (pos as { latitude?: number; longitude?: number } | undefined);
+          if (
+            p &&
+            typeof p.latitude === "number" &&
+            typeof p.longitude === "number"
+          ) {
+            weather = await fetchWeather(
+              p.latitude,
+              p.longitude,
+              config.weather as WeatherConfig,
+              { fetchImpl: weatherFetch },
+            );
+          }
+        }
+
         const system =
           (config.systemPrompt || DEFAULT_SYSTEM_PROMPT) +
-          (boat ? `\n\nCurrent boat data:\n${boat}` : "");
+          (boat ? `\n\nCurrent boat data:\n${boat}` : "") +
+          (weather ? `\n\nWeather forecast at the boat:\n${weather}` : "");
         const messages: ChatMessage[] = [
           { role: "system", content: system },
           { role: "user", content: text },
@@ -371,4 +448,13 @@ module.exports = function (app: App) {
   };
 
   return plugin;
+};
+
+// Test-only seam: point the Open-Meteo fetch at a loopback stub. Not part of
+// the plugin's public surface — the tests import it to exercise the weather
+// path without reaching the internet.
+(
+  module.exports as { __setWeatherFetch?: (f: typeof fetch) => void }
+).__setWeatherFetch = (f: typeof fetch) => {
+  weatherFetch = f;
 };

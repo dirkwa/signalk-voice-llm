@@ -113,6 +113,61 @@ export async function startFakeLlm(
   };
 }
 
+// --- Fake Open-Meteo -----------------------------------------------------
+
+export interface FakeWeather {
+  /** A fetch impl that answers any URL with the canned forecast. */
+  fetchImpl: typeof fetch;
+  /** Every URL the plugin requested, in order (to assert the position). */
+  requests: string[];
+  /** Respond with an HTTP error instead of a forecast. */
+  setStatus(status: number): void;
+}
+
+/**
+ * A stub for api.open-meteo.com. Rather than stand up TCP (the plugin's
+ * weather URL is hard-coded to the real host), this hands back a fetch impl
+ * the test injects via the plugin's __setWeatherFetch seam — same idea as the
+ * loopback LLM, but the interception point is fetch instead of the URL.
+ */
+export function startFakeOpenMeteo(
+  body: Record<string, unknown> = {
+    current: {
+      temperature_2m: 16.8,
+      wind_speed_10m: 12,
+      wind_direction_10m: 225,
+      weather_code: 3,
+      pressure_msl: 1016,
+    },
+    hourly: {
+      time: ["2026-08-01T00:00", "2026-08-01T04:00", "2026-08-01T08:00"],
+      temperature_2m: [16, 15, 17],
+      wind_speed_10m: [12, 18, 20],
+      wind_gusts_10m: [16, 24, 28],
+      wind_direction_10m: [225, 240, 250],
+      precipitation_probability: [10, 40, 60],
+    },
+  },
+): FakeWeather {
+  const requests: string[] = [];
+  let status = 200;
+  const fetchImpl = (async (input: unknown) => {
+    requests.push(String(input));
+    return {
+      ok: status === 200,
+      status,
+      json: async () => body,
+    } as Response;
+  }) as typeof fetch;
+  return {
+    fetchImpl,
+    requests,
+    setStatus(s) {
+      status = s;
+    },
+  };
+}
+
 // --- Mock Signal K app ---------------------------------------------------
 
 export interface SpokenUtterance {
