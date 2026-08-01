@@ -8,7 +8,13 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
-import { createMockApp, settle, startFakeLlm, waitFor } from "./harness";
+import {
+  createMockApp,
+  settle,
+  startFakeLlm,
+  startFakeOpenMeteo,
+  waitFor,
+} from "./harness";
 
 // require() rather than import: the plugin is CommonJS
 // (module.exports = function (app) {…}), which is the shape Signal K loads.
@@ -477,4 +483,172 @@ test("exposes a config schema that matches the runtime defaults", async () => {
   assert.equal(schema.properties.llm!.properties!.timeoutMs!.default, 30000);
   assert.equal(schema.properties.replyTargetOriginOnly!.default, true);
   assert.equal(schema.properties.speakErrors!.default, true);
+});
+
+test("feeds a live forecast for the boat's position to the model", async () => {
+  const llm = await startFakeLlm("Fresh breeze this afternoon.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  // getSelfPath returns a full SK node ({ value, ... }) — the plugin must
+  // unwrap it to read lat/lon.
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
+  mock.provideSay();
+  mock.sendCommand("what's the wind doing this afternoon", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  // The forecast fetch used the boat's actual position.
+  assert.equal(meteo.requests.length, 1, "should fetch the forecast once");
+  assert.match(meteo.requests[0]!, /latitude=54\.32/);
+  assert.match(meteo.requests[0]!, /longitude=10\.14/);
+
+  // And the formatted forecast reached the model as context.
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.ok(system, "a system message should carry the forecast");
+  assert.match(system.content, /Weather forecast/i);
+  assert.match(system.content, /overcast/, "WMO code 3 -> overcast");
+  assert.match(system.content, /wind SW 12 kn/, "current wind, compass + kn");
+  assert.match(system.content, /gusting/, "hourly gusts summarised");
+  // No raw placeholders or untranslated fields leak in.
+  assert.doesNotMatch(system.content, /undefined|NaN|weather_code/);
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("skips the forecast when weather is disabled", async () => {
+  const llm = await startFakeLlm("Ok.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { enabled: false, baseUrl: meteo.baseUrl },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("weather?");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  assert.equal(meteo.requests.length, 0, "must not fetch when disabled");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Weather forecast/i);
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("still answers when the forecast fetch fails", async () => {
+  const llm = await startFakeLlm("Answering anyway.");
+  const meteo = await startFakeOpenMeteo();
+  meteo.setStatus(503); // Open-Meteo down / rate-limited
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was spoken");
+
+  // A failed forecast must not block or crash the reply — just no weather block.
+  assert.equal(mock.spoken[0]!.text, "Answering anyway.");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.deepEqual(mock.errorLog, [], "a weather miss is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("a hung forecast respects the timeout and still answers", async () => {
+  const llm = await startFakeLlm("Answered without weather.");
+  const meteo = await startFakeOpenMeteo();
+  meteo.setHang(true); // Open-Meteo never responds
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  // Short weather timeout so the test doesn't wait the 8s default; the reply
+  // must still come, just without a forecast.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { baseUrl: meteo.baseUrl, timeoutMs: 200 },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "the reply never came");
+
+  assert.equal(meteo.requests.length, 1, "the forecast was attempted");
+  assert.equal(mock.spoken[0]!.text, "Answered without weather.");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.deepEqual(mock.errorLog, [], "a weather timeout is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("skips the forecast when the boat has no position", async () => {
+  const llm = await startFakeLlm("No fix.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp(); // no navigation.position set
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
+  mock.provideSay();
+  mock.sendCommand("weather?");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  assert.equal(meteo.requests.length, 0, "no position -> no forecast fetch");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("survives a non-object navigation.position without throwing", async () => {
+  const llm = await startFakeLlm("Still answering.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  // A malformed/legacy delta: a truthy primitive, not an object. `"value" in
+  // pos` would throw here — and under void onCommand() that's an unhandled
+  // rejection, violating "never crash signalk-server".
+  mock.selfPaths["navigation.position"] = 42 as unknown;
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was spoken");
+
+  assert.equal(mock.spoken[0]!.text, "Still answering.");
+  assert.equal(meteo.requests.length, 0, "a bad position must not be fetched");
+  assert.deepEqual(mock.errorLog, [], "a bad position is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
 });

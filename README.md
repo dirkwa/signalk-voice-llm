@@ -23,6 +23,12 @@ you speak  →  voice.command (SignalK)
   - **Anchor** — anchored?, current vs. watch radius, _drag_ detection
   - **Environment** — apparent/true wind, water/air temperature, pressure
   - **Electrical / tanks** — battery SOC/voltage, fuel + water levels
+- **Fetches a live weather forecast** for the boat's position
+  ([Open-Meteo](https://open-meteo.com), free, no API key) — a local LLM has
+  no internet of its own, so this is how it answers "what's the wind doing
+  tonight?". The current conditions plus a short forecast trend (wind, gusts,
+  rain chance, temperature) are added to the context. Best-effort: if the
+  forecast can't be fetched, the assistant just answers without it.
 - **Speaks the reply** via signalk-wyoming's `say()`, defaulting to the
   satellite that asked. Answers are prompted to be short (they are read aloud).
 - **STT-robust** — the system prompt tells the model the text came from
@@ -52,6 +58,9 @@ In the plugin config:
 | `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                    |
 | `systemPrompt`                                | how the assistant behaves (kept short — replies are spoken)    |
 | `context.*`                                   | which boat-data groups to feed the LLM                         |
+| `weather.enabled`                             | fetch a live Open-Meteo forecast for the boat's position       |
+| `weather.forecastHours`                       | how far ahead to summarise (1–48)                              |
+| `weather.timeoutMs` / `cacheMs`               | forecast request timeout; reuse window between fetches         |
 | `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)              |
 | `speakErrors`                                 | speak a short error if the LLM is unreachable                  |
 

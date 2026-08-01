@@ -1,5 +1,6 @@
 import { chat, ChatMessage, LlmConfig } from "./llm";
 import { buildContext, ContextGroups, SelfPathReader } from "./context";
+import { fetchWeather, WeatherConfig, WEATHER_DEFAULTS } from "./weather";
 
 // ---------------------------------------------------------------------------
 // SignalK plugin: voice.command -> LLM -> say()
@@ -53,6 +54,11 @@ interface Config {
   };
   systemPrompt: string;
   context: ContextGroups;
+  // Live weather forecast (Open-Meteo) for the boat's position — the local LLM
+  // has no internet, so this fetches the forecast and feeds it as context.
+  weather: {
+    enabled: boolean;
+  } & WeatherConfig;
   replyTargetOriginOnly: boolean;
   speakErrors: boolean;
 }
@@ -86,6 +92,10 @@ const SCHEMA_DEFAULTS: Config = {
     environment: true,
     electrical: true,
   },
+  weather: {
+    enabled: true,
+    ...WEATHER_DEFAULTS,
+  },
   replyTargetOriginOnly: true,
   speakErrors: true,
 };
@@ -100,6 +110,7 @@ function withDefaults(incoming: Partial<Config> | undefined): Config {
     ...cfg,
     llm: { ...SCHEMA_DEFAULTS.llm, ...(cfg.llm ?? {}) },
     context: { ...SCHEMA_DEFAULTS.context, ...(cfg.context ?? {}) },
+    weather: { ...SCHEMA_DEFAULTS.weather, ...(cfg.weather ?? {}) },
   };
 }
 
@@ -192,6 +203,44 @@ module.exports = function (app: App) {
             },
           },
         },
+        weather: {
+          type: "object",
+          title: "Weather forecast (Open-Meteo, no API key)",
+          description:
+            "Fetches a live forecast for the boat's position so the assistant can answer weather questions — the local LLM has no internet on its own.",
+          properties: {
+            enabled: {
+              type: "boolean",
+              title: "Enable weather forecast",
+              default: SCHEMA_DEFAULTS.weather.enabled,
+            },
+            forecastHours: {
+              type: "number",
+              title: "Forecast window (hours)",
+              description: "How far ahead to summarise (1–48).",
+              default: SCHEMA_DEFAULTS.weather.forecastHours,
+            },
+            timeoutMs: {
+              type: "number",
+              title: "Forecast request timeout (ms)",
+              default: SCHEMA_DEFAULTS.weather.timeoutMs,
+            },
+            cacheMs: {
+              type: "number",
+              title: "Forecast cache (ms)",
+              description:
+                "Reuse the last forecast for this long instead of refetching. 0 disables.",
+              default: SCHEMA_DEFAULTS.weather.cacheMs,
+            },
+            baseUrl: {
+              type: "string",
+              title: "Open-Meteo base URL",
+              description:
+                "The forecast API host. Leave as the default unless you run a self-hosted Open-Meteo instance.",
+              default: SCHEMA_DEFAULTS.weather.baseUrl,
+            },
+          },
+        },
         replyTargetOriginOnly: {
           type: "boolean",
           title: "Reply only to the satellite that asked",
@@ -269,9 +318,43 @@ module.exports = function (app: App) {
         };
 
         const boat = buildContext(reader, config.context);
+
+        // Fetch a live forecast for the current position (best-effort — never
+        // throws, returns "" when off / unavailable). The local LLM can't
+        // reach the internet, so this is how it answers weather questions.
+        let weather = "";
+        if (config.weather.enabled) {
+          // getSelfPath may return a bare value OR a SK node ({ value, ... }).
+          // Guard with typeof before `in` — a truthy primitive (malformed/
+          // legacy delta) would make `"value" in raw` throw a TypeError, and
+          // this runs under `void onCommand(...)`, so a throw becomes an
+          // unhandled rejection (violating "never crash signalk-server").
+          const raw: unknown = app.getSelfPath("navigation.position");
+          const node =
+            raw !== null && typeof raw === "object" && "value" in raw
+              ? (raw as { value?: unknown }).value
+              : raw;
+          const p =
+            node !== null && typeof node === "object"
+              ? (node as { latitude?: unknown; longitude?: unknown })
+              : undefined;
+          if (
+            p &&
+            typeof p.latitude === "number" &&
+            typeof p.longitude === "number"
+          ) {
+            weather = await fetchWeather(
+              p.latitude,
+              p.longitude,
+              config.weather as WeatherConfig,
+            );
+          }
+        }
+
         const system =
           (config.systemPrompt || DEFAULT_SYSTEM_PROMPT) +
-          (boat ? `\n\nCurrent boat data:\n${boat}` : "");
+          (boat ? `\n\nCurrent boat data:\n${boat}` : "") +
+          (weather ? `\n\nWeather forecast at the boat:\n${weather}` : "");
         const messages: ChatMessage[] = [
           { role: "system", content: system },
           { role: "user", content: text },

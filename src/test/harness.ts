@@ -113,6 +113,90 @@ export async function startFakeLlm(
   };
 }
 
+// --- Fake Open-Meteo -----------------------------------------------------
+
+export interface FakeWeather {
+  /** Base URL to hand the plugin as weather.baseUrl (real fetch reaches it). */
+  baseUrl: string;
+  /** Every request path the plugin fetched, in order (to assert the position). */
+  requests: string[];
+  /** Respond with an HTTP error instead of a forecast. */
+  setStatus(status: number): void;
+  /** Never respond, so the client's own AbortController timeout fires. */
+  setHang(hang: boolean): void;
+  close(): Promise<void>;
+}
+
+const DEFAULT_METEO_BODY = {
+  current: {
+    temperature_2m: 16.8,
+    wind_speed_10m: 12,
+    wind_direction_10m: 225,
+    weather_code: 3,
+    pressure_msl: 1016,
+  },
+  hourly: {
+    time: ["2026-08-01T00:00", "2026-08-01T04:00", "2026-08-01T08:00"],
+    temperature_2m: [16, 15, 17],
+    wind_speed_10m: [12, 18, 20],
+    wind_gusts_10m: [16, 24, 28],
+    wind_direction_10m: [225, 240, 250],
+    precipitation_probability: [10, 40, 60],
+  },
+};
+
+/**
+ * A real loopback stub for Open-Meteo, mirroring startFakeLlm: the plugin is
+ * pointed at this via weather.baseUrl and reaches it over real TCP with the
+ * real fetch — so no test-only fetch hook has to live in the shipped module.
+ */
+export async function startFakeOpenMeteo(
+  body: Record<string, unknown> = DEFAULT_METEO_BODY,
+): Promise<FakeWeather> {
+  const requests: string[] = [];
+  let status = 200;
+  let hang = false;
+  const openResponses = new Set<http.ServerResponse>();
+
+  const server = http.createServer((req, res) => {
+    req.socket.unref();
+    requests.push(req.url ?? "");
+    if (hang) {
+      openResponses.add(res);
+      return; // never respond — the client's timeout must fire
+    }
+    if (status !== 200) {
+      res.writeHead(status);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+  });
+
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve()),
+  );
+  server.unref();
+  const port = (server.address() as AddressInfo).port;
+
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    requests,
+    setStatus(s) {
+      status = s;
+    },
+    setHang(h) {
+      hang = h;
+    },
+    async close() {
+      for (const r of openResponses) r.destroy();
+      openResponses.clear();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
 // --- Mock Signal K app ---------------------------------------------------
 
 export interface SpokenUtterance {
