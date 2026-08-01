@@ -20,6 +20,20 @@ export interface WeatherConfig {
   // Open-Meteo instance — and it's the seam the tests use to point the fetch
   // at a loopback stub, so no test-only hook has to ship in the module.
   baseUrl: string;
+  // Whether to also fetch the marine forecast (swell + wave period) alongside
+  // the wind/weather forecast. Free and keyless, but on a different Open-Meteo
+  // host (see marineBaseUrl); off-water positions just yield nothing.
+  marine: boolean;
+  // Open-Meteo Marine API base (the /v1/marine host — a DIFFERENT subdomain
+  // from the main forecast host, which 404s on /v1/marine). Also the test seam.
+  marineBaseUrl: string;
+  // WorldTides API base (/api/v3). Tides have no reliable keyless source, so
+  // this is opt-in: it stays off until a key is supplied. Also the test seam.
+  tidesBaseUrl: string;
+  // WorldTides API key. Empty = tides disabled (the default — no signup needed;
+  // marine + weather still work). A free key from worldtides.info enables the
+  // next high/low tide extremes for the boat's position.
+  tidesApiKey: string;
 }
 
 export const WEATHER_DEFAULTS: WeatherConfig = {
@@ -27,6 +41,10 @@ export const WEATHER_DEFAULTS: WeatherConfig = {
   timeoutMs: 8000,
   cacheMs: 10 * 60 * 1000, // 10 minutes — weather moves slowly
   baseUrl: "https://api.open-meteo.com",
+  marine: true,
+  marineBaseUrl: "https://marine-api.open-meteo.com",
+  tidesBaseUrl: "https://www.worldtides.info",
+  tidesApiKey: "",
 };
 
 // WMO weather-interpretation codes -> short plain-language descriptions.
@@ -109,11 +127,37 @@ interface OpenMeteoResponse {
   };
 }
 
+interface MarineResponse {
+  current?: {
+    wave_height?: number;
+    wave_direction?: number;
+    wave_period?: number;
+    swell_wave_height?: number;
+    swell_wave_period?: number;
+  };
+}
+
+// WorldTides "extremes" response: a list of upcoming high/low waters.
+// https://www.worldtides.info/apidocs
+interface TidesResponse {
+  extremes?: {
+    dt?: number; // unix seconds
+    date?: string; // ISO
+    height?: number; // metres relative to datum
+    type?: string; // "High" | "Low"
+  }[];
+}
+
 function n(v: unknown): number | undefined {
   return typeof v === "number" && isFinite(v) ? v : undefined;
 }
 function round(v: number): string {
   return Math.round(v).toString();
+}
+// One decimal for sub-metre marine quantities where rounding to whole metres
+// would erase the signal (0.3 m swell → "0" reads as flat).
+function round1(v: number): string {
+  return (Math.round(v * 10) / 10).toString();
 }
 
 // Format the API payload into a short, TTS-friendly forecast block. Returns ""
@@ -176,6 +220,49 @@ export function formatForecast(
   return lines.join("\n");
 }
 
+// One-line sea-state summary from the marine payload, or "" if nothing usable.
+export function formatMarine(data: MarineResponse): string {
+  const c = data.current;
+  if (!c) return "";
+  const parts: string[] = [];
+  const wh = n(c.wave_height);
+  const wd = compass(c.wave_direction);
+  const wp = n(c.wave_period);
+  if (wh !== undefined)
+    parts.push(
+      `waves ${round1(wh)} m${wd ? ` from ${wd}` : ""}${
+        wp !== undefined ? ` at ${round1(wp)} s` : ""
+      }`,
+    );
+  const sh = n(c.swell_wave_height);
+  const sp = n(c.swell_wave_period);
+  if (sh !== undefined)
+    parts.push(
+      `swell ${round1(sh)} m${sp !== undefined ? ` at ${round1(sp)} s` : ""}`,
+    );
+  return parts.length ? `Sea state: ${parts.join(", ")}.` : "";
+}
+
+// Next couple of tide extremes as a short line, or "" if none upcoming.
+// `nowSec` lets the caller (and tests) anchor "next" deterministically.
+export function formatTides(data: TidesResponse, nowSec: number): string {
+  const ex = Array.isArray(data.extremes) ? data.extremes : [];
+  const upcoming = ex
+    .filter((e) => typeof e.dt === "number" && (e.dt as number) >= nowSec)
+    .slice(0, 2);
+  const items: string[] = [];
+  for (const e of upcoming) {
+    const kind = typeof e.type === "string" ? e.type.toLowerCase() : "tide";
+    const time = typeof e.date === "string" ? e.date.slice(11, 16) : "";
+    const h = n(e.height);
+    if (time)
+      items.push(
+        `${kind} at ${time}${h !== undefined ? ` (${round1(h)} m)` : ""}`,
+      );
+  }
+  return items.length ? `Tides: next ${items.join(", then ")}.` : "";
+}
+
 interface CacheEntry {
   key: string; // rounded lat,lon so nearby positions reuse the fetch
   at: number;
@@ -209,9 +296,11 @@ export async function fetchWeather(
   const base = (cfg.baseUrl || WEATHER_DEFAULTS.baseUrl).replace(/\/+$/, "");
 
   // Cache on ~1 km-rounded position (a drifting/anchored boat reuses the fetch;
-  // a passage that moves refreshes). Key also on the base URL so a different
-  // endpoint never serves another's cached forecast.
-  const key = `${base}|${lat.toFixed(2)},${lon.toFixed(2)}`;
+  // a passage that moves refreshes). Key also on the base URL and the enabled
+  // sources so a config change never serves a stale/partial cached block.
+  const key =
+    `${base}|${lat.toFixed(2)},${lon.toFixed(2)}` +
+    `|m${cfg.marine ? 1 : 0}|t${cfg.tidesApiKey ? 1 : 0}`;
   if (
     cfg.cacheMs > 0 &&
     cache &&
@@ -221,6 +310,31 @@ export async function fetchWeather(
     return cache.text;
   }
 
+  // Forecast, marine and tides are independent best-effort fetches — run them
+  // concurrently and stitch whatever comes back. Any one failing (or disabled)
+  // just drops its line; the block is still useful with the others.
+  const [forecast, marine, tides] = await Promise.all([
+    fetchForecast(lat, lon, cfg, fetchImpl),
+    cfg.marine ? fetchMarine(lat, lon, cfg, fetchImpl) : Promise.resolve(""),
+    cfg.tidesApiKey
+      ? fetchTides(lat, lon, cfg, fetchImpl, now)
+      : Promise.resolve(""),
+  ]);
+
+  const text = [forecast, marine, tides].filter(Boolean).join("\n");
+  if (text && cfg.cacheMs > 0) cache = { key, at: now(), text };
+  return text;
+}
+
+// --- individual source fetches (each never throws; returns "" on any error) --
+
+async function fetchForecast(
+  lat: number,
+  lon: number,
+  cfg: WeatherConfig,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  const base = (cfg.baseUrl || WEATHER_DEFAULTS.baseUrl).replace(/\/+$/, "");
   const url =
     `${base}/v1/forecast` +
     `?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
@@ -228,20 +342,63 @@ export async function fetchWeather(
     "&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation_probability" +
     `&forecast_hours=${Math.max(1, Math.min(48, cfg.forecastHours))}` +
     "&wind_speed_unit=kn&timezone=auto";
+  const data = await getJson<OpenMeteoResponse>(url, cfg.timeoutMs, fetchImpl);
+  return data ? formatForecast(data, cfg.forecastHours) : "";
+}
 
+async function fetchMarine(
+  lat: number,
+  lon: number,
+  cfg: WeatherConfig,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  const base = (cfg.marineBaseUrl || WEATHER_DEFAULTS.marineBaseUrl).replace(
+    /\/+$/,
+    "",
+  );
+  const url =
+    `${base}/v1/marine` +
+    `?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
+    "&current=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_period" +
+    "&timezone=auto";
+  const data = await getJson<MarineResponse>(url, cfg.timeoutMs, fetchImpl);
+  return data ? formatMarine(data) : "";
+}
+
+async function fetchTides(
+  lat: number,
+  lon: number,
+  cfg: WeatherConfig,
+  fetchImpl: typeof fetch,
+  now: () => number,
+): Promise<string> {
+  const base = (cfg.tidesBaseUrl || WEATHER_DEFAULTS.tidesBaseUrl).replace(
+    /\/+$/,
+    "",
+  );
+  const url =
+    `${base}/api/v3` +
+    `?extremes&lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}` +
+    `&key=${encodeURIComponent(cfg.tidesApiKey)}`;
+  const data = await getJson<TidesResponse>(url, cfg.timeoutMs, fetchImpl);
+  return data ? formatTides(data, Math.floor(now() / 1000)) : "";
+}
+
+// GET + parse JSON with a timeout. Returns null on any failure (non-2xx,
+// offline, timeout, malformed) so callers stay best-effort.
+async function getJson<T>(
+  url: string,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+): Promise<T | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchImpl(url, { signal: controller.signal });
-    if (!res.ok) return "";
-    const data = (await res.json()) as OpenMeteoResponse;
-    const text = formatForecast(data, cfg.forecastHours);
-    if (text && cfg.cacheMs > 0) cache = { key, at: now(), text };
-    return text;
+    if (!res.ok) return null;
+    return (await res.json()) as T;
   } catch {
-    // Offline, timeout, DNS, malformed JSON — all non-fatal. The assistant
-    // just answers without a forecast (or says it doesn't have one).
-    return "";
+    return null;
   } finally {
     clearTimeout(timer);
   }

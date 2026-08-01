@@ -1,6 +1,7 @@
 import { chat, ChatMessage, LlmConfig } from "./llm";
 import { buildContext, ContextGroups, SelfPathReader } from "./context";
 import { fetchWeather, WeatherConfig, WEATHER_DEFAULTS } from "./weather";
+import { PROVIDERS, ProviderId, resolveBaseUrl } from "./providers";
 
 // ---------------------------------------------------------------------------
 // SignalK plugin: voice.command -> LLM -> say()
@@ -45,6 +46,10 @@ interface App {
 
 interface Config {
   llm: {
+    // Which OpenAI-compatible backend to use. A remote preset (groq/cerebras/
+    // openrouter) overrides baseUrl with its fixed host; local/custom use the
+    // baseUrl below. Absent in configs predating this field → treated as local.
+    provider: ProviderId;
     baseUrl: string;
     model: string;
     apiKey: string;
@@ -78,6 +83,7 @@ const DEFAULT_SYSTEM_PROMPT =
 // incoming config in start().
 const SCHEMA_DEFAULTS: Config = {
   llm: {
+    provider: "local",
     baseUrl: "http://192.168.0.50:1234/v1",
     model: "qwen2.5-7b-instruct",
     apiKey: "",
@@ -132,25 +138,34 @@ module.exports = function (app: App) {
           type: "object",
           title: "LLM server (OpenAI-compatible)",
           properties: {
+            provider: {
+              type: "string",
+              title: "Provider",
+              description:
+                "Local = your on-boat server (LM Studio/Ollama). Groq/Cerebras/OpenRouter = free, fast hosted models (need internet + an API key; the question and boat data leave the boat). Custom = any other OpenAI-compatible URL. A hosted provider overrides the Base URL below.",
+              enum: Object.keys(PROVIDERS),
+              enumNames: Object.values(PROVIDERS).map((p) => p.label),
+              default: SCHEMA_DEFAULTS.llm.provider,
+            },
             baseUrl: {
               type: "string",
-              title: "Base URL",
+              title: "Base URL (local / custom only)",
               description:
-                "OpenAI-compatible endpoint. LM Studio: http://<windows-ip>:1234/v1 · Ollama: http://<host>:11434/v1",
+                "Used when Provider is Local or Custom (a hosted provider ignores this). LM Studio: http://<windows-ip>:1234/v1 · Ollama: http://<host>:11434/v1",
               default: SCHEMA_DEFAULTS.llm.baseUrl,
             },
             model: {
               type: "string",
               title: "Model",
               description:
-                "Model id as loaded in the server (LM Studio shows it at the top). E.g. qwen2.5-7b-instruct",
+                "Model id for the chosen provider. Local (LM Studio) shows it at the top. Groq: llama-3.3-70b-versatile · Cerebras: llama-3.3-70b · OpenRouter: meta-llama/llama-3.3-70b-instruct:free",
               default: SCHEMA_DEFAULTS.llm.model,
             },
             apiKey: {
               type: "string",
               title: "API key",
               description:
-                "Usually empty for local servers (LM Studio/Ollama).",
+                "Empty for local servers. Required for hosted providers — create one in the provider's console (Groq/Cerebras/OpenRouter all offer a free tier).",
               default: SCHEMA_DEFAULTS.llm.apiKey,
             },
             temperature: {
@@ -239,6 +254,34 @@ module.exports = function (app: App) {
                 "The forecast API host. Leave as the default unless you run a self-hosted Open-Meteo instance.",
               default: SCHEMA_DEFAULTS.weather.baseUrl,
             },
+            marine: {
+              type: "boolean",
+              title: "Include sea state (swell & waves)",
+              description:
+                "Also fetch the Open-Meteo Marine forecast (wave height/period, swell) for the boat's position. Free, no API key.",
+              default: SCHEMA_DEFAULTS.weather.marine,
+            },
+            marineBaseUrl: {
+              type: "string",
+              title: "Open-Meteo Marine base URL",
+              description:
+                "The marine API host (a different subdomain from the forecast host). Leave as the default unless self-hosting.",
+              default: SCHEMA_DEFAULTS.weather.marineBaseUrl,
+            },
+            tidesApiKey: {
+              type: "string",
+              title: "WorldTides API key (optional — enables tides)",
+              description:
+                "Tides need a key (no free keyless source exists). Leave empty to skip tides; weather and sea state still work. Get a free key at worldtides.info to add next high/low water.",
+              default: SCHEMA_DEFAULTS.weather.tidesApiKey,
+            },
+            tidesBaseUrl: {
+              type: "string",
+              title: "WorldTides base URL",
+              description:
+                "The tides API host. Leave as the default unless you proxy it.",
+              default: SCHEMA_DEFAULTS.weather.tidesBaseUrl,
+            },
           },
         },
         replyTargetOriginOnly: {
@@ -265,9 +308,13 @@ module.exports = function (app: App) {
       // Diagnostic surfaced via status (readable over the API without the
       // plugin debug flag): reflects whether the say() handle was acquired.
       let sayAcquired = false;
+      const activeBaseUrl = resolveBaseUrl(
+        config.llm.provider,
+        config.llm.baseUrl,
+      );
       const refreshStatus = () => {
         app.setPluginStatus?.(
-          `${sayAcquired ? "say() ready" : "waiting for signalk-wyoming say()"} — LLM ${config.llm.baseUrl} (${config.llm.model})`,
+          `${sayAcquired ? "say() ready" : "waiting for signalk-wyoming say()"} — LLM ${config.llm.provider}:${activeBaseUrl} (${config.llm.model})`,
         );
       };
 
@@ -309,7 +356,7 @@ module.exports = function (app: App) {
             : undefined;
 
         const llmCfg: LlmConfig = {
-          baseUrl: config.llm.baseUrl,
+          baseUrl: resolveBaseUrl(config.llm.provider, config.llm.baseUrl),
           model: config.llm.model,
           apiKey: config.llm.apiKey || undefined,
           temperature: config.llm.temperature,
@@ -354,7 +401,9 @@ module.exports = function (app: App) {
         const system =
           (config.systemPrompt || DEFAULT_SYSTEM_PROMPT) +
           (boat ? `\n\nCurrent boat data:\n${boat}` : "") +
-          (weather ? `\n\nWeather forecast at the boat:\n${weather}` : "");
+          (weather
+            ? `\n\nWeather and sea conditions at the boat:\n${weather}`
+            : "");
         const messages: ChatMessage[] = [
           { role: "system", content: system },
           { role: "user", content: text },

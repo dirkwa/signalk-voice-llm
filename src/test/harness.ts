@@ -145,6 +145,25 @@ const DEFAULT_METEO_BODY = {
   },
 };
 
+const DEFAULT_MARINE_BODY = {
+  current: {
+    wave_height: 1.2,
+    wave_direction: 300,
+    wave_period: 5.5,
+    swell_wave_height: 0.8,
+    swell_wave_period: 7.2,
+  },
+};
+
+// Two extremes far in the future so formatTides always considers them upcoming
+// regardless of the test clock (the plugin passes the real Date.now()).
+const DEFAULT_TIDES_BODY = {
+  extremes: [
+    { dt: 4102448400, date: "2100-01-01T06:00", height: 1.4, type: "High" },
+    { dt: 4102470000, date: "2100-01-01T12:00", height: 0.2, type: "Low" },
+  ],
+};
+
 /**
  * A real loopback stub for Open-Meteo, mirroring startFakeLlm: the plugin is
  * pointed at this via weather.baseUrl and reaches it over real TCP with the
@@ -160,7 +179,8 @@ export async function startFakeOpenMeteo(
 
   const server = http.createServer((req, res) => {
     req.socket.unref();
-    requests.push(req.url ?? "");
+    const url = req.url ?? "";
+    requests.push(url);
     if (hang) {
       openResponses.add(res);
       return; // never respond — the client's timeout must fire
@@ -170,8 +190,15 @@ export async function startFakeOpenMeteo(
       res.end();
       return;
     }
+    // Route by path so the same stub can back forecast, marine and tides —
+    // the plugin fetches all three when they're enabled.
+    const payload = url.startsWith("/v1/marine")
+      ? DEFAULT_MARINE_BODY
+      : url.startsWith("/api/v3")
+        ? DEFAULT_TIDES_BODY
+        : body;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(body));
+    res.end(JSON.stringify(payload));
   });
 
   await new Promise<void>((resolve) =>

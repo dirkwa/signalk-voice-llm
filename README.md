@@ -23,12 +23,15 @@ you speak  →  voice.command (SignalK)
   - **Anchor** — anchored?, current vs. watch radius, _drag_ detection
   - **Environment** — apparent/true wind, water/air temperature, pressure
   - **Electrical / tanks** — battery SOC/voltage, fuel + water levels
-- **Fetches a live weather forecast** for the boat's position
+- **Fetches live weather + sea state** for the boat's position
   ([Open-Meteo](https://open-meteo.com), free, no API key) — a local LLM has
   no internet of its own, so this is how it answers "what's the wind doing
   tonight?". The current conditions plus a short forecast trend (wind, gusts,
-  rain chance, temperature) are added to the context. Best-effort: if the
-  forecast can't be fetched, the assistant just answers without it.
+  rain chance, temperature) are added to the context, along with **sea state**
+  (wave height/period and swell) from the Open-Meteo Marine API. **Tides** (next
+  high/low water) can be added with a free [WorldTides](https://www.worldtides.info)
+  key — off by default, since tides have no keyless source. Best-effort: any
+  source that can't be fetched is simply omitted.
 - **Speaks the reply** via signalk-wyoming's `say()`, defaulting to the
   satellite that asked. Answers are prompted to be short (they are read aloud).
 - **STT-robust** — the system prompt tells the model the text came from
@@ -41,28 +44,37 @@ you speak  →  voice.command (SignalK)
   it provides both halves this plugin depends on: the `voice.command` path and
   the `say()` API. Install it from the Signal K App Store (it is declared as a
   `requires` dependency, so the App Store will flag it if missing).
-- An **OpenAI-compatible** chat endpoint. Examples:
-  - **LM Studio** — Developer → Start Server; `http://<host>:1234/v1`
-  - **Ollama** — `http://<host>:11434/v1`
-  - **llama.cpp server**, or any compatible gateway.
+- An **OpenAI-compatible** chat endpoint. Pick a **provider** in the config:
+  - **Local** — an on-boat server: **LM Studio** (Developer → Start Server;
+    `http://<host>:1234/v1`), **Ollama** (`http://<host>:11434/v1`),
+    llama.cpp, or any compatible gateway. Private and works offline.
+  - **Groq / Cerebras / OpenRouter** — free-tier hosted models, fast enough for
+    voice and far more capable than a small local model. These need internet and
+    an API key (create one in the provider's console), and the question plus the
+    boat snapshot leave the boat. A hosted provider is the way to discuss
+    weather, routes and sailing destinations with a strong model.
+  - **Custom** — any other OpenAI-compatible URL.
 
 ## Configure
 
 In the plugin config:
 
-| Field                                         | Notes                                                          |
-| --------------------------------------------- | -------------------------------------------------------------- |
-| `llm.baseUrl`                                 | e.g. `http://192.168.0.50:1234/v1`                             |
-| `llm.model`                                   | model id as the server reports it (e.g. `qwen2.5-7b-instruct`) |
-| `llm.apiKey`                                  | usually empty for local servers                                |
-| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                    |
-| `systemPrompt`                                | how the assistant behaves (kept short — replies are spoken)    |
-| `context.*`                                   | which boat-data groups to feed the LLM                         |
-| `weather.enabled`                             | fetch a live Open-Meteo forecast for the boat's position       |
-| `weather.forecastHours`                       | how far ahead to summarise (1–48)                              |
-| `weather.timeoutMs` / `cacheMs`               | forecast request timeout; reuse window between fetches         |
-| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)              |
-| `speakErrors`                                 | speak a short error if the LLM is unreachable                  |
+| Field                                         | Notes                                                                             |
+| --------------------------------------------- | --------------------------------------------------------------------------------- |
+| `llm.provider`                                | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                            |
+| `llm.baseUrl`                                 | used by `local`/`custom` (a hosted provider overrides it)                         |
+| `llm.model`                                   | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`) |
+| `llm.apiKey`                                  | empty for local; required for a hosted provider                                   |
+| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                                       |
+| `systemPrompt`                                | how the assistant behaves (kept short — replies are spoken)                       |
+| `context.*`                                   | which boat-data groups to feed the LLM                                            |
+| `weather.enabled`                             | fetch a live Open-Meteo forecast for the boat's position                          |
+| `weather.forecastHours`                       | how far ahead to summarise (1–48)                                                 |
+| `weather.marine`                              | also include sea state (waves + swell) from Open-Meteo Marine                     |
+| `weather.tidesApiKey`                         | a free WorldTides key enables next high/low water (blank = off)                   |
+| `weather.timeoutMs` / `cacheMs`               | request timeout; reuse window between fetches                                     |
+| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)                                 |
+| `speakErrors`                                 | speak a short error if the LLM is unreachable                                     |
 
 ## Notes
 
