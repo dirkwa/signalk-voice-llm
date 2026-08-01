@@ -21,7 +21,7 @@ import {
 // A fresh require per test would be pointless — the module holds no state
 // outside the factory — but the factory itself must be called per test.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pluginModule = require(path.join(__dirname, "..", "index.js")) as ((
+const pluginFactory = require(path.join(__dirname, "..", "index.js")) as (
   app: unknown,
 ) => {
   start(config: unknown): void;
@@ -29,13 +29,7 @@ const pluginModule = require(path.join(__dirname, "..", "index.js")) as ((
   schema(): unknown;
   id: string;
   name: string;
-}) & { __setWeatherFetch: (f: typeof fetch) => void };
-const pluginFactory = pluginModule;
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { _clearWeatherCache } = require(
-  path.join(__dirname, "..", "weather.js"),
-) as { _clearWeatherCache: () => void };
+};
 
 function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
   return {
@@ -493,9 +487,7 @@ test("exposes a config schema that matches the runtime defaults", async () => {
 
 test("feeds a live forecast for the boat's position to the model", async () => {
   const llm = await startFakeLlm("Fresh breeze this afternoon.");
-  const meteo = startFakeOpenMeteo();
-  _clearWeatherCache();
-  pluginFactory.__setWeatherFetch(meteo.fetchImpl);
+  const meteo = await startFakeOpenMeteo();
 
   const mock = createMockApp();
   // getSelfPath returns a full SK node ({ value, ... }) — the plugin must
@@ -505,7 +497,7 @@ test("feeds a live forecast for the boat's position to the model", async () => {
   };
 
   const plugin = pluginFactory(mock.app);
-  plugin.start(configFor(llm.baseUrl));
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
   mock.provideSay();
   mock.sendCommand("what's the wind doing this afternoon", "cockpit");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
@@ -527,13 +519,12 @@ test("feeds a live forecast for the boat's position to the model", async () => {
 
   plugin.stop();
   await llm.close();
+  await meteo.close();
 });
 
 test("skips the forecast when weather is disabled", async () => {
   const llm = await startFakeLlm("Ok.");
-  const meteo = startFakeOpenMeteo();
-  _clearWeatherCache();
-  pluginFactory.__setWeatherFetch(meteo.fetchImpl);
+  const meteo = await startFakeOpenMeteo();
 
   const mock = createMockApp();
   mock.selfPaths["navigation.position"] = {
@@ -541,7 +532,11 @@ test("skips the forecast when weather is disabled", async () => {
   };
 
   const plugin = pluginFactory(mock.app);
-  plugin.start(configFor(llm.baseUrl, { weather: { enabled: false } }));
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { enabled: false, baseUrl: meteo.baseUrl },
+    }),
+  );
   mock.provideSay();
   mock.sendCommand("weather?");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
@@ -552,14 +547,13 @@ test("skips the forecast when weather is disabled", async () => {
 
   plugin.stop();
   await llm.close();
+  await meteo.close();
 });
 
 test("still answers when the forecast fetch fails", async () => {
   const llm = await startFakeLlm("Answering anyway.");
-  const meteo = startFakeOpenMeteo();
+  const meteo = await startFakeOpenMeteo();
   meteo.setStatus(503); // Open-Meteo down / rate-limited
-  _clearWeatherCache();
-  pluginFactory.__setWeatherFetch(meteo.fetchImpl);
 
   const mock = createMockApp();
   mock.selfPaths["navigation.position"] = {
@@ -567,7 +561,7 @@ test("still answers when the forecast fetch fails", async () => {
   };
 
   const plugin = pluginFactory(mock.app);
-  plugin.start(configFor(llm.baseUrl));
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
   mock.provideSay();
   mock.sendCommand("weather?", "cockpit");
   await waitFor(() => mock.spoken.length > 0, "no reply was spoken");
@@ -580,17 +574,49 @@ test("still answers when the forecast fetch fails", async () => {
 
   plugin.stop();
   await llm.close();
+  await meteo.close();
+});
+
+test("a hung forecast respects the timeout and still answers", async () => {
+  const llm = await startFakeLlm("Answered without weather.");
+  const meteo = await startFakeOpenMeteo();
+  meteo.setHang(true); // Open-Meteo never responds
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  // Short weather timeout so the test doesn't wait the 8s default; the reply
+  // must still come, just without a forecast.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { baseUrl: meteo.baseUrl, timeoutMs: 200 },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "the reply never came");
+
+  assert.equal(meteo.requests.length, 1, "the forecast was attempted");
+  assert.equal(mock.spoken[0]!.text, "Answered without weather.");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.deepEqual(mock.errorLog, [], "a weather timeout is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
 });
 
 test("skips the forecast when the boat has no position", async () => {
   const llm = await startFakeLlm("No fix.");
-  const meteo = startFakeOpenMeteo();
-  _clearWeatherCache();
-  pluginFactory.__setWeatherFetch(meteo.fetchImpl);
+  const meteo = await startFakeOpenMeteo();
 
   const mock = createMockApp(); // no navigation.position set
   const plugin = pluginFactory(mock.app);
-  plugin.start(configFor(llm.baseUrl));
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
   mock.provideSay();
   mock.sendCommand("weather?");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
@@ -599,4 +625,30 @@ test("skips the forecast when the boat has no position", async () => {
 
   plugin.stop();
   await llm.close();
+  await meteo.close();
+});
+
+test("survives a non-object navigation.position without throwing", async () => {
+  const llm = await startFakeLlm("Still answering.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  // A malformed/legacy delta: a truthy primitive, not an object. `"value" in
+  // pos` would throw here — and under void onCommand() that's an unhandled
+  // rejection, violating "never crash signalk-server".
+  mock.selfPaths["navigation.position"] = 42 as unknown;
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { baseUrl: meteo.baseUrl } }));
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was spoken");
+
+  assert.equal(mock.spoken[0]!.text, "Still answering.");
+  assert.equal(meteo.requests.length, 0, "a bad position must not be fetched");
+  assert.deepEqual(mock.errorLog, [], "a bad position is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
 });

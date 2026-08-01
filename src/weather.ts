@@ -16,12 +16,17 @@ export interface WeatherConfig {
   // Cache the last forecast this long so a burst of questions doesn't refetch
   // (and so we can answer instantly). 0 disables caching.
   cacheMs: number;
+  // Open-Meteo API base (the /v1/forecast host). Overridable for a self-hosted
+  // Open-Meteo instance — and it's the seam the tests use to point the fetch
+  // at a loopback stub, so no test-only hook has to ship in the module.
+  baseUrl: string;
 }
 
 export const WEATHER_DEFAULTS: WeatherConfig = {
   forecastHours: 12,
   timeoutMs: 8000,
   cacheMs: 10 * 60 * 1000, // 10 minutes — weather moves slowly
+  baseUrl: "https://api.open-meteo.com",
 };
 
 // WMO weather-interpretation codes -> short plain-language descriptions.
@@ -178,7 +183,10 @@ interface CacheEntry {
 }
 let cache: CacheEntry | null = null;
 
-// For tests: swap the fetch implementation and the clock.
+// Injectable clock + fetch. These are ordinary function parameters (not global
+// mutation hooks), so they carry no test-only surface into the shipped module:
+// production omits `deps` and gets the real clock + fetch. Tests pass a stub
+// fetch and/or a fake clock.
 export interface WeatherDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -198,10 +206,12 @@ export async function fetchWeather(
   if (!isFinite(lat) || !isFinite(lon)) return "";
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = deps.now ?? Date.now;
+  const base = (cfg.baseUrl || WEATHER_DEFAULTS.baseUrl).replace(/\/+$/, "");
 
-  // Cache on ~1 km-rounded position so a drifting/anchored boat reuses the
-  // fetch, but a passage that moves refreshes.
-  const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  // Cache on ~1 km-rounded position (a drifting/anchored boat reuses the fetch;
+  // a passage that moves refreshes). Key also on the base URL so a different
+  // endpoint never serves another's cached forecast.
+  const key = `${base}|${lat.toFixed(2)},${lon.toFixed(2)}`;
   if (
     cfg.cacheMs > 0 &&
     cache &&
@@ -212,7 +222,7 @@ export async function fetchWeather(
   }
 
   const url =
-    "https://api.open-meteo.com/v1/forecast" +
+    `${base}/v1/forecast` +
     `?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
     "&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code,pressure_msl" +
     "&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation_probability" +
@@ -235,9 +245,4 @@ export async function fetchWeather(
   } finally {
     clearTimeout(timer);
   }
-}
-
-// Test hook: reset the module-level cache between cases.
-export function _clearWeatherCache(): void {
-  cache = null;
 }

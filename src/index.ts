@@ -114,12 +114,6 @@ function withDefaults(incoming: Partial<Config> | undefined): Config {
   };
 }
 
-// The weather fetch defaults to the global fetch. Tests override it to point
-// the Open-Meteo call at a loopback stub (the URL is otherwise hard-coded to
-// api.open-meteo.com), mirroring how the LLM client is exercised over real TCP.
-let weatherFetch: typeof fetch = ((...args: Parameters<typeof fetch>) =>
-  fetch(...args)) as typeof fetch;
-
 module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
   let say: SayFn | null = null;
@@ -238,6 +232,13 @@ module.exports = function (app: App) {
                 "Reuse the last forecast for this long instead of refetching. 0 disables.",
               default: SCHEMA_DEFAULTS.weather.cacheMs,
             },
+            baseUrl: {
+              type: "string",
+              title: "Open-Meteo base URL",
+              description:
+                "The forecast API host. Leave as the default unless you run a self-hosted Open-Meteo instance.",
+              default: SCHEMA_DEFAULTS.weather.baseUrl,
+            },
           },
         },
         replyTargetOriginOnly: {
@@ -323,14 +324,20 @@ module.exports = function (app: App) {
         // reach the internet, so this is how it answers weather questions.
         let weather = "";
         if (config.weather.enabled) {
-          const pos = app.getSelfPath("navigation.position") as
-            | { value?: { latitude?: number; longitude?: number } }
-            | { latitude?: number; longitude?: number }
-            | undefined;
+          // getSelfPath may return a bare value OR a SK node ({ value, ... }).
+          // Guard with typeof before `in` — a truthy primitive (malformed/
+          // legacy delta) would make `"value" in raw` throw a TypeError, and
+          // this runs under `void onCommand(...)`, so a throw becomes an
+          // unhandled rejection (violating "never crash signalk-server").
+          const raw: unknown = app.getSelfPath("navigation.position");
+          const node =
+            raw !== null && typeof raw === "object" && "value" in raw
+              ? (raw as { value?: unknown }).value
+              : raw;
           const p =
-            pos && "value" in pos
-              ? (pos.value ?? undefined)
-              : (pos as { latitude?: number; longitude?: number } | undefined);
+            node !== null && typeof node === "object"
+              ? (node as { latitude?: unknown; longitude?: unknown })
+              : undefined;
           if (
             p &&
             typeof p.latitude === "number" &&
@@ -340,7 +347,6 @@ module.exports = function (app: App) {
               p.latitude,
               p.longitude,
               config.weather as WeatherConfig,
-              { fetchImpl: weatherFetch },
             );
           }
         }
@@ -448,13 +454,4 @@ module.exports = function (app: App) {
   };
 
   return plugin;
-};
-
-// Test-only seam: point the Open-Meteo fetch at a loopback stub. Not part of
-// the plugin's public surface — the tests import it to exercise the weather
-// path without reaching the internet.
-(
-  module.exports as { __setWeatherFetch?: (f: typeof fetch) => void }
-).__setWeatherFetch = (f: typeof fetch) => {
-  weatherFetch = f;
 };
