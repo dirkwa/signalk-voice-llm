@@ -213,7 +213,7 @@ test("never throws on hostile / malformed path values", () => {
   assert.doesNotThrow(() => {
     const out = buildContext(hostile, ALL);
     assert.equal(typeof out, "string");
-    assert.doesNotMatch(out, /undefined|NaN|Infinity/);
+    assert.doesNotMatch(out, /undefined|NaN|Infinity|null/);
   });
 });
 
