@@ -251,6 +251,8 @@ module.exports = function (app: App) {
             forecastHours: {
               type: "number",
               title: "Forecast window (intervals)",
+              minimum: 1,
+              maximum: 48,
               description:
                 "How many forecast intervals ahead to summarise (1–48; the provider sets the interval length, typically hourly).",
               default: SCHEMA_DEFAULTS.weather.forecastHours,

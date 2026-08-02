@@ -193,6 +193,8 @@ export interface MockApp {
    * (as an unregistered provider does). Not called => app.weatherApi absent.
    */
   setWeather(forecasts: unknown[] | Error): void;
+  /** Every getForecasts() call the plugin made, as [position, type, opts]. */
+  weatherCalls: unknown[][];
 }
 
 export function createMockApp(
@@ -211,6 +213,7 @@ export function createMockApp(
   const errorLog: string[] = [];
   const statusLog: string[] = [];
   const pluginErrorLog: string[] = [];
+  const weatherCalls: unknown[][] = [];
   const selfPaths: Record<string, unknown> = {};
 
   let deltaHandler: ((delta: unknown) => void) | undefined;
@@ -258,6 +261,7 @@ export function createMockApp(
     statusLog,
     pluginErrorLog,
     selfPaths,
+    weatherCalls,
     sendCommand(text, satellite) {
       if (!deltaHandler) throw new Error("plugin never subscribed to deltas");
       deltaHandler({
@@ -287,7 +291,8 @@ export function createMockApp(
     },
     setWeather(forecasts) {
       app.weatherApi = {
-        getForecasts: async () => {
+        getForecasts: async (...args: unknown[]) => {
+          weatherCalls.push(args);
           if (forecasts instanceof Error) throw forecasts;
           return forecasts;
         },

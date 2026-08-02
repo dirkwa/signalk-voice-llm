@@ -19,17 +19,11 @@ import {
 
 const CFG: WeatherConfig = { ...WEATHER_DEFAULTS };
 
-// A stub weatherApi returning the given forecasts (or throwing / returning
-// non-array to exercise the failure paths).
-function stubApi(
-  forecasts: WeatherData[] | (() => never) | unknown,
-): WeatherApiLike {
+// A stub weatherApi returning the given value verbatim, so the tests can feed
+// malformed and non-array payloads through the same helper.
+function stubApi(forecasts: unknown): WeatherApiLike {
   return {
-    getForecasts: async () => {
-      if (typeof forecasts === "function")
-        return (forecasts as () => WeatherData[])();
-      return forecasts as WeatherData[];
-    },
+    getForecasts: async () => forecasts as WeatherData[],
   };
 }
 

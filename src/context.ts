@@ -131,7 +131,7 @@ export function buildContext(
     const hNow = num(reader.get("environment.tide.heightNow"));
     if (hNow !== undefined)
       tide.push(`${fmt(hNow)} m${tState ? ` and ${tState}` : ""}`);
-    const extremes: { label: string; time?: string; h?: number }[] = [
+    const extremes = [
       {
         label: "high",
         time: str(reader.get("environment.tide.timeHigh")),
@@ -143,12 +143,18 @@ export function buildContext(
         h: num(reader.get("environment.tide.heightLow")),
       },
     ]
-      .filter((e) => e.time)
-      .sort((a, b) => (a.time! < b.time! ? -1 : 1));
+      // Parse to epoch: drop unparseable timestamps (so a bad string can't
+      // produce a blank time) and sort chronologically (string compare would
+      // mishandle mixed offsets and tie on equal values).
+      .flatMap((e) => {
+        const ms = e.time ? Date.parse(e.time) : NaN;
+        return isFinite(ms) ? [{ ...e, ms }] : [];
+      })
+      .sort((a, b) => a.ms - b.ms);
     for (const e of extremes) {
-      const hhmm = e.time!.slice(11, 16); // HH:MM (UTC)
+      const hhmm = new Date(e.ms).toISOString().slice(11, 16); // UTC
       tide.push(
-        `next ${e.label} water ${hhmm}${e.h !== undefined ? ` (${fmt(e.h)} m)` : ""}`,
+        `next ${e.label} water ${hhmm} UTC${e.h !== undefined ? ` (${fmt(e.h)} m)` : ""}`,
       );
     }
     if (tide.length) lines.push("Tide: " + tide.join("; ") + ".");

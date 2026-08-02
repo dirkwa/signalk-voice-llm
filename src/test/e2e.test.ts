@@ -596,13 +596,7 @@ test("skips weather when disabled", async () => {
   mock.selfPaths["navigation.position"] = {
     value: { latitude: 54.32, longitude: 10.14 },
   };
-  let asked = false;
-  mock.app.weatherApi = {
-    getForecasts: async () => {
-      asked = true;
-      return WX_SAMPLE;
-    },
-  };
+  mock.setWeather(WX_SAMPLE);
 
   const plugin = pluginFactory(mock.app);
   plugin.start(configFor(llm.baseUrl, { weather: { enabled: false } }));
@@ -610,9 +604,41 @@ test("skips weather when disabled", async () => {
   mock.sendCommand("weather?");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
-  assert.equal(asked, false, "must not call the weather API when disabled");
+  assert.equal(
+    mock.weatherCalls.length,
+    0,
+    "must not call the weather API when disabled",
+  );
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
   assert.doesNotMatch(system!.content, /Weather and sea conditions/i);
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("uses default forecastHours/marine when weather config is partial", async () => {
+  // A config with only { enabled: true } must still fetch — the nested merge
+  // fills forecastHours (12) and marine (true) from the defaults.
+  const llm = await startFakeLlm("Breezy.");
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+  mock.setWeather(WX_SAMPLE);
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(configFor(llm.baseUrl, { weather: { enabled: true } }));
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  assert.equal(mock.weatherCalls.length, 1);
+  const [pos, type, opts] = mock.weatherCalls[0]!;
+  assert.deepEqual(pos, { latitude: 54.32, longitude: 10.14 });
+  assert.equal(type, "point");
+  assert.deepEqual(opts, { maxCount: 12 }, "default forecastHours");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.match(system!.content, /Sea state/, "default marine=true summarised");
 
   plugin.stop();
   await llm.close();
@@ -668,13 +694,7 @@ test("answers normally when app.weatherApi is absent entirely", async () => {
 test("skips weather when the boat has no position", async () => {
   const llm = await startFakeLlm("No fix.");
   const mock = createMockApp(); // no navigation.position set
-  let asked = false;
-  mock.app.weatherApi = {
-    getForecasts: async () => {
-      asked = true;
-      return WX_SAMPLE;
-    },
-  };
+  mock.setWeather(WX_SAMPLE);
 
   const plugin = pluginFactory(mock.app);
   plugin.start(configFor(llm.baseUrl));
@@ -682,7 +702,7 @@ test("skips weather when the boat has no position", async () => {
   mock.sendCommand("weather?");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
-  assert.equal(asked, false, "no position -> no weather call");
+  assert.equal(mock.weatherCalls.length, 0, "no position -> no weather call");
 
   plugin.stop();
   await llm.close();

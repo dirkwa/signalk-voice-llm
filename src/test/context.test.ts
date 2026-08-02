@@ -167,8 +167,8 @@ test("tide: reports current height + state and orders next high/low by time", ()
     lowIdx > 0 && highIdx > 0 && lowIdx < highIdx,
     "sooner extreme first",
   );
-  assert.match(out, /next low water 14:56 \(0\.6 m\)/);
-  assert.match(out, /next high water 08:55 \(1\.8 m\)/);
+  assert.match(out, /next low water 14:56 UTC \(0\.6 m\)/);
+  assert.match(out, /next high water 08:55 UTC \(1\.8 m\)/);
 });
 
 test("tide: omitted entirely when no tide data is present", () => {

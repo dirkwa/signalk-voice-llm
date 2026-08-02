@@ -143,7 +143,12 @@ export function formatForecast(
   for (const i of picks) {
     const f = forecasts[i];
     if (!f) continue;
-    const time = typeof f.date === "string" ? f.date.slice(11, 16) : ""; // HH:MM (UTC)
+    // Normalise to UTC and label it, so an offset-bearing timestamp isn't read
+    // as boat-local and a bare HH:MM isn't mis-spoken as local time.
+    const ms = typeof f.date === "string" ? Date.parse(f.date) : NaN;
+    const time = isFinite(ms)
+      ? `${new Date(ms).toISOString().slice(11, 16)} UTC`
+      : "";
     const parts: string[] = [];
     const ws = n(f.wind?.speedTrue);
     const wd = compassRad(f.wind?.directionTrue);
@@ -193,6 +198,12 @@ export function formatMarine(forecasts: WeatherData[]): string {
  * the call fails, or nothing usable) — NEVER throws, so a missing forecast can
  * never fail a voice reply.
  */
+// A weather provider fetches over the internet, and the voice reply waits on
+// this call before asking the LLM. Bound it so a hung/slow provider degrades to
+// "no weather" instead of swallowing the whole command (the try/catch alone
+// can't rescue a promise that never settles).
+const WEATHER_TIMEOUT_MS = 8000;
+
 export async function fetchWeather(
   lat: number,
   lon: number,
@@ -203,15 +214,25 @@ export async function fetchWeather(
   if (!isFinite(lat) || !isFinite(lon)) return "";
   const maxCount = Math.max(1, Math.min(48, cfg.forecastHours));
   let forecasts: WeatherData[];
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    forecasts = await weatherApi.getForecasts(
-      { latitude: lat, longitude: lon },
-      "point",
-      { maxCount },
-    );
+    forecasts = await Promise.race([
+      weatherApi.getForecasts({ latitude: lat, longitude: lon }, "point", {
+        maxCount,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("weather provider timeout")),
+          WEATHER_TIMEOUT_MS,
+        );
+      }),
+    ]);
   } catch {
-    // No provider registered / provider error — best-effort, just no weather.
+    // No provider registered / provider error / timeout — best-effort, just
+    // no weather.
     return "";
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (!Array.isArray(forecasts)) return "";
   const parts: string[] = [];
