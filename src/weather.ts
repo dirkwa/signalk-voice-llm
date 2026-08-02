@@ -139,13 +139,14 @@ interface MarineResponse {
 
 // WorldTides "extremes" response: a list of upcoming high/low waters.
 // https://www.worldtides.info/apidocs
+interface TideExtreme {
+  dt?: number; // unix seconds
+  date?: string; // ISO 8601 (local, since we request &localtime)
+  height?: number; // metres relative to datum
+  type?: string; // "High" | "Low"
+}
 interface TidesResponse {
-  extremes?: {
-    dt?: number; // unix seconds
-    date?: string; // ISO
-    height?: number; // metres relative to datum
-    type?: string; // "High" | "Low"
-  }[];
+  extremes?: (TideExtreme | null)[];
 }
 
 function n(v: unknown): number | undefined {
@@ -248,7 +249,17 @@ export function formatMarine(data: MarineResponse): string {
 export function formatTides(data: TidesResponse, nowSec: number): string {
   const ex = Array.isArray(data.extremes) ? data.extremes : [];
   const upcoming = ex
-    .filter((e) => typeof e.dt === "number" && (e.dt as number) >= nowSec)
+    // Guard `e` itself: a malformed payload can carry null/non-object array
+    // elements, and dereferencing e.dt on those would throw — which, on the
+    // `void onCommand` path, becomes an unhandled rejection (crashing the
+    // server). The formatters must tolerate any JSON the endpoint returns.
+    .filter(
+      (e): e is TideExtreme =>
+        e !== null &&
+        typeof e === "object" &&
+        typeof (e as TideExtreme).dt === "number" &&
+        (e as TideExtreme).dt! >= nowSec,
+    )
     .slice(0, 2);
   const items: string[] = [];
   for (const e of upcoming) {
@@ -295,13 +306,19 @@ export async function fetchWeather(
   const now = deps.now ?? Date.now;
   const base = (cfg.baseUrl || WEATHER_DEFAULTS.baseUrl).replace(/\/+$/, "");
 
+  // Tides are time-relative: "next high/low" is computed against now() at fetch
+  // time. Caching that text would let an extreme that has since passed still be
+  // reported as "next" until the cache expires. So the cache is used only when
+  // tides are OFF — forecast + marine values tolerate the cacheMs staleness
+  // ("weather moves slowly"); a time-relative answer does not.
+  const cacheable = !cfg.tidesApiKey;
   // Cache on ~1 km-rounded position (a drifting/anchored boat reuses the fetch;
   // a passage that moves refreshes). Key also on the base URL and the enabled
   // sources so a config change never serves a stale/partial cached block.
   const key =
-    `${base}|${lat.toFixed(2)},${lon.toFixed(2)}` +
-    `|m${cfg.marine ? 1 : 0}|t${cfg.tidesApiKey ? 1 : 0}`;
+    `${base}|${lat.toFixed(2)},${lon.toFixed(2)}` + `|m${cfg.marine ? 1 : 0}`;
   if (
+    cacheable &&
     cfg.cacheMs > 0 &&
     cache &&
     cache.key === key &&
@@ -322,7 +339,7 @@ export async function fetchWeather(
   ]);
 
   const text = [forecast, marine, tides].filter(Boolean).join("\n");
-  if (text && cfg.cacheMs > 0) cache = { key, at: now(), text };
+  if (text && cacheable && cfg.cacheMs > 0) cache = { key, at: now(), text };
   return text;
 }
 
@@ -343,7 +360,7 @@ async function fetchForecast(
     `&forecast_hours=${Math.max(1, Math.min(48, cfg.forecastHours))}` +
     "&wind_speed_unit=kn&timezone=auto";
   const data = await getJson<OpenMeteoResponse>(url, cfg.timeoutMs, fetchImpl);
-  return data ? formatForecast(data, cfg.forecastHours) : "";
+  return data ? safeFormat(() => formatForecast(data, cfg.forecastHours)) : "";
 }
 
 async function fetchMarine(
@@ -362,7 +379,7 @@ async function fetchMarine(
     "&current=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_period" +
     "&timezone=auto";
   const data = await getJson<MarineResponse>(url, cfg.timeoutMs, fetchImpl);
-  return data ? formatMarine(data) : "";
+  return data ? safeFormat(() => formatMarine(data)) : "";
 }
 
 async function fetchTides(
@@ -376,12 +393,30 @@ async function fetchTides(
     /\/+$/,
     "",
   );
+  // &localtime makes WorldTides return extreme times with the location's local
+  // offset (default is UTC) — so the spoken "high water at HH:MM" matches the
+  // skipper's clock and the forecast lines (which use timezone=auto).
   const url =
     `${base}/api/v3` +
-    `?extremes&lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}` +
+    `?extremes&localtime&lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}` +
     `&key=${encodeURIComponent(cfg.tidesApiKey)}`;
   const data = await getJson<TidesResponse>(url, cfg.timeoutMs, fetchImpl);
-  return data ? formatTides(data, Math.floor(now() / 1000)) : "";
+  return data
+    ? safeFormat(() => formatTides(data, Math.floor(now() / 1000)))
+    : "";
+}
+
+// Run a formatter, absorbing any throw into "". The formatters are written to
+// tolerate malformed input, but they run OUTSIDE getJson's try/catch, so a
+// missed edge case would otherwise reject out of fetchWeather and, under the
+// `void onCommand` caller, become an unhandled rejection (crashing the server).
+// This is the backstop that keeps the never-throws guarantee true.
+function safeFormat(fn: () => string): string {
+  try {
+    return fn();
+  } catch {
+    return "";
+  }
 }
 
 // GET + parse JSON with a timeout. Returns null on any failure (non-2xx,

@@ -15,6 +15,7 @@ import {
   startFakeOpenMeteo,
   waitFor,
 } from "./harness";
+import { PROVIDERS, resolveBaseUrl } from "../providers";
 
 // require() rather than import: the plugin is CommonJS
 // (module.exports = function (app) {…}), which is the shape Signal K loads.
@@ -528,6 +529,11 @@ test("feeds a live forecast for the boat's position to the model", async () => {
   assert.match(system.content, /overcast/, "WMO code 3 -> overcast");
   assert.match(system.content, /wind SW 12 kn/, "current wind, compass + kn");
   assert.match(system.content, /gusting/, "hourly gusts summarised");
+  assert.match(
+    system.content,
+    /waves 1\.2 m from WNW/,
+    "marine waves summarised",
+  );
   assert.match(system.content, /swell 0\.8 m/, "marine swell summarised");
   // No raw placeholders or untranslated fields leak in.
   assert.doesNotMatch(system.content, /undefined|NaN|weather_code/);
@@ -739,11 +745,14 @@ test("does not fetch tides without a key", async () => {
   await meteo.close();
 });
 
-test("a hosted provider preset overrides the base URL end-to-end", async () => {
+test("custom provider sends to the configured URL; hosted overrides it", async () => {
   // The plugin must send its request to the provider preset's host, not the
-  // configured local baseUrl. We point groq's request at our stub by giving the
-  // stub's URL as the model server and selecting provider 'custom' (custom uses
-  // baseUrl verbatim), then separately assert the resolver for the fixed hosts.
+  // baseUrl verbatim — so pointing baseUrl at the stub proves the request path
+  // (config -> resolveBaseUrl -> chat) reaches the configured host end-to-end.
+  // The *override* branch (a hosted preset replacing baseUrl) can't be driven
+  // to a stub without a live host, so it is covered by the unit test in
+  // providers.test.ts; here we additionally assert, at this boundary, that a
+  // hosted selection would NOT resolve to the configured local URL.
   const llm = await startFakeLlm("Via custom.");
   const mock = createMockApp();
   const plugin = pluginFactory(mock.app);
@@ -766,6 +775,19 @@ test("a hosted provider preset overrides the base URL end-to-end", async () => {
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
   assert.equal(mock.spoken[0]!.text, "Via custom.");
+  assert.equal(
+    llm.requests.length,
+    1,
+    "custom must send to the configured baseUrl (the stub)",
+  );
+  // And a hosted provider must resolve AWAY from that same configured URL.
+  assert.notEqual(
+    resolveBaseUrl("groq", llm.baseUrl),
+    llm.baseUrl,
+    "a hosted preset must override the configured baseUrl",
+  );
+  assert.equal(resolveBaseUrl("groq", llm.baseUrl), PROVIDERS.groq.baseUrl);
+
   plugin.stop();
   await llm.close();
 });

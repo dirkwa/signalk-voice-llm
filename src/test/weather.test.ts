@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { formatMarine, formatTides } from "../weather";
+import { formatMarine, formatTides, WEATHER_DEFAULTS } from "../weather";
 
 test("formatMarine summarises waves and swell in nautical units", () => {
   const out = formatMarine({
@@ -59,4 +59,49 @@ test("formatTides returns empty when nothing is upcoming", () => {
     "",
     "all extremes in the past -> nothing",
   );
+});
+
+test("formatTides tolerates malformed elements without throwing", () => {
+  // A null/garbage element must not throw — under `void onCommand` a throw
+  // becomes an unhandled rejection (crashing the server). It should skip the
+  // bad element and use the good ones.
+  const now = 1000;
+  assert.doesNotThrow(() =>
+    formatTides(
+      {
+        extremes: [
+          null,
+          42 as unknown as { dt?: number },
+          "x" as unknown as { dt?: number },
+          {},
+          { dt: now + 100, date: "1970-01-12T15:00", height: 0.3, type: "Low" },
+        ],
+      },
+      now,
+    ),
+  );
+  const out = formatTides(
+    {
+      extremes: [
+        null,
+        { dt: now + 100, date: "1970-01-12T15:00", height: 0.3, type: "Low" },
+      ],
+    },
+    now,
+  );
+  assert.match(out, /low at 15:00/, "the good element still comes through");
+});
+
+test("WEATHER_DEFAULTS point marine and tides at the right hosts", () => {
+  // The marine API lives on a DIFFERENT subdomain from the forecast host (the
+  // forecast host 404s on /v1/marine). Guard the default so a typo can't
+  // silently send marine requests to a host that rejects them.
+  assert.equal(
+    WEATHER_DEFAULTS.marineBaseUrl,
+    "https://marine-api.open-meteo.com",
+  );
+  assert.equal(WEATHER_DEFAULTS.baseUrl, "https://api.open-meteo.com");
+  assert.equal(WEATHER_DEFAULTS.tidesBaseUrl, "https://www.worldtides.info");
+  assert.equal(WEATHER_DEFAULTS.tidesApiKey, "", "tides off by default");
+  assert.equal(WEATHER_DEFAULTS.marine, true, "marine on by default");
 });
