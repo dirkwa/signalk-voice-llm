@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────
+# Local checks — a self-contained gate that does NOT depend on the
+# shared SignalK reusable workflow (signalk-ci.yml). It runs the same
+# format-check, build and tests directly, so formatting and test
+# regressions block a PR even if the upstream reusable workflow changes
+# or is unavailable. This mirrors the local `npm run build:all` gate
+# (ci-lint → build → test) that contributors run before pushing.
+# ─────────────────────────────────────────────────────────────
+
+name: Checks
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      # eslint + `prettier --check` — fails the build on any lint error or
+      # unformatted file (run `npm run format` locally to fix before pushing).
+      - name: Format & lint check
+        run: npm run ci-lint
+
+      # The test suite runs against compiled output, so build first.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
