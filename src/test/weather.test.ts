@@ -160,3 +160,31 @@ test("fetchWeather returns '' for a non-finite position", async () => {
   assert.equal(await fetchWeather(NaN, 10, CFG, stubApi(SAMPLE)), "");
   assert.equal(await fetchWeather(54, Infinity, CFG, stubApi(SAMPLE)), "");
 });
+
+test("fetchWeather times out a hung provider instead of blocking", async () => {
+  // A provider that never settles must NOT hang the voice reply — the call is
+  // bounded and degrades to "no weather". (Short timeout so the test is fast.)
+  const hung: WeatherApiLike = {
+    getForecasts: () => new Promise<never>(() => {}), // never resolves
+  };
+  const t0 = Date.now();
+  const out = await fetchWeather(54.32, 10.14, CFG, hung, 100);
+  assert.equal(out, "", "a hung provider degrades to no weather");
+  assert.ok(Date.now() - t0 < 2000, "returned promptly, did not block");
+});
+
+test("fetchWeather still returns data when the provider beats the timeout", async () => {
+  const slowish: WeatherApiLike = {
+    getForecasts: () =>
+      new Promise((resolve) => setTimeout(() => resolve(SAMPLE), 10)),
+  };
+  const out = await fetchWeather(54.32, 10.14, CFG, slowish, 500);
+  assert.match(out, /Now: Partly cloudy/, "a provider under the timeout wins");
+});
+
+test("formatForecast labels later sample times as UTC", () => {
+  // The forecast trend times must carry an explicit UTC marker so the model
+  // can't speak them as boat-local. SAMPLE[1].date is 09:00Z.
+  const out = formatForecast(SAMPLE, 12);
+  assert.match(out, /Later: 09:00 UTC /, "sample time labelled UTC");
+});

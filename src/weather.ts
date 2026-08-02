@@ -209,6 +209,9 @@ export async function fetchWeather(
   lon: number,
   cfg: WeatherConfig,
   weatherApi: WeatherApiLike | undefined,
+  // Overridable only so tests can drive the timeout path without waiting the
+  // full 8 s; production always uses the default.
+  timeoutMs: number = WEATHER_TIMEOUT_MS,
 ): Promise<string> {
   if (!weatherApi || typeof weatherApi.getForecasts !== "function") return "";
   if (!isFinite(lat) || !isFinite(lon)) return "";
@@ -223,7 +226,7 @@ export async function fetchWeather(
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error("weather provider timeout")),
-          WEATHER_TIMEOUT_MS,
+          timeoutMs,
         );
       }),
     ]);
