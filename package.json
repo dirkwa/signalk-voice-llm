@@ -39,7 +39,8 @@
     ],
     "recommends": [
       "@signalk/open-meteo-provider",
-      "signalk-tides"
+      "signalk-tides",
+      "@yachteye/signalk-timezone-plugin"
     ]
   },
   "signalk-plugin-enabled-by-default": false,

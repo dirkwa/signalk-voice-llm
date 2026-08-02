@@ -52,11 +52,75 @@ export interface ContextGroups {
   electrical: boolean;
 }
 
+// Render the boat's current LOCAL date+time for the model, so it can reason
+// about "now", "tonight", "the next high water" etc. Sourced from
+// environment.time.localTime (published by a timezone plugin, e.g.
+// @yachteye/signalk-timezone-plugin) — an ISO string that ALREADY carries the
+// local wall-clock and offset, e.g. "2026-08-03T09:11:57.600+12:00". We format
+// from that string's own fields (not via new Date(), which would re-interpret
+// it in the server's timezone). Returns "" if the path is absent.
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+function currentTimeLine(reader: SelfPathReader): string {
+  const iso = str(reader.get("environment.time.localTime"));
+  if (!iso) return "";
+  // Require a FULL ISO local-datetime: date, time, optional seconds/fraction,
+  // and an optional offset (Z or ±HH:MM). Anchoring both ends rejects trailing
+  // garbage; the field ranges + the round-trip check below reject impossible
+  // calendar values (month 13, day 45, 25:61, Feb 30).
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/.exec(
+      iso,
+    );
+  if (!m) return "";
+  const [, y, mon, day, hh, mm] = m;
+  const yr = Number(y);
+  const monN = Number(mon);
+  const dayN = Number(day);
+  const hhN = Number(hh);
+  const mmN = Number(mm);
+  if (monN < 1 || monN > 12 || dayN < 1 || dayN > 31) return "";
+  if (hhN > 23 || mmN > 59) return "";
+  // Reject impossible dates (e.g. Feb 30) via a UTC round-trip on the wall-clock
+  // date: if the parts survive normalisation unchanged, the date is real. UTC
+  // here is only used to derive the weekday of that local calendar date.
+  const d = new Date(Date.UTC(yr, monN - 1, dayN));
+  if (
+    d.getUTCFullYear() !== yr ||
+    d.getUTCMonth() !== monN - 1 ||
+    d.getUTCDate() !== dayN
+  ) {
+    return "";
+  }
+  const monName = MONTHS[monN - 1] ?? mon;
+  const wd = WEEKDAYS[d.getUTCDay()];
+  const date = `${wd ? wd + " " : ""}${day} ${monName}`;
+  return `Current time: ${date} ${hh}:${mm} (local boat time).`;
+}
+
 export function buildContext(
   reader: SelfPathReader,
   groups: ContextGroups,
 ): string {
   const lines: string[] = [];
+
+  // Always first: the model needs to know what time it is now, independent of
+  // any group toggle. Omitted only when no local-time path is published.
+  const timeLine = currentTimeLine(reader);
+  if (timeLine) lines.push(timeLine);
 
   if (groups.navigation) {
     const nav: string[] = [];

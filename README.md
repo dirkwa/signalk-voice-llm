@@ -47,6 +47,12 @@ you speak  →  voice.command (SignalK)
 - **STT-robust** — the system prompt tells the model the text came from
   speech-to-text and may be misheard, so it interprets nautically
   (e.g. "debt" → "depth").
+- **Knows the local time** — SignalK publishes only UTC, so when a timezone
+  plugin (e.g.
+  [@yachteye/signalk-timezone-plugin](https://www.npmjs.com/package/@yachteye/signalk-timezone-plugin))
+  supplies the boat's local time, the assistant includes it in the context and
+  can reason about "now", "tonight", and when the next tide is. Without such a
+  plugin, the time line is simply omitted.
 
 ## Requirements
 
@@ -65,12 +71,15 @@ you speak  →  voice.command (SignalK)
     boat. A hosted provider is the way to discuss weather, routes and sailing
     destinations with a strong model.
   - **Custom** — any other OpenAI-compatible URL.
-- **Optional, for weather & tides** — install a SignalK **weather-provider**
-  plugin (recommended:
+- **Optional, for weather, tides & local time** — install a SignalK
+  **weather-provider** plugin (recommended:
   [@signalk/open-meteo-provider](https://www.npmjs.com/package/@signalk/open-meteo-provider),
-  free, no key) and a **tides** plugin
-  ([signalk-tides](https://www.npmjs.com/package/signalk-tides)). Without them,
-  the weather/tide lines are simply skipped. These are listed under
+  free, no key), a **tides** plugin
+  ([signalk-tides](https://www.npmjs.com/package/signalk-tides)), and a
+  **timezone** plugin
+  ([@yachteye/signalk-timezone-plugin](https://www.npmjs.com/package/@yachteye/signalk-timezone-plugin),
+  so the assistant knows the boat's local time). Without them, the
+  weather/tide/time lines are simply skipped. All three are listed under
   `signalk.recommends`, so the App Store suggests them.
 
 ## Configure

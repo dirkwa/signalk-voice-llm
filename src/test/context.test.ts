@@ -32,6 +32,85 @@ function reader(paths: Record<string, unknown>): SelfPathReader {
   return { get: (p) => paths[p] };
 }
 
+test("current time: renders local date+time from environment.time.localTime", () => {
+  // The localTime string already carries the boat's local wall-clock + offset;
+  // we format from its own fields, so it's independent of the test TZ.
+  const out = buildContext(
+    reader({
+      "environment.time.localTime": "2026-08-03T09:11:57.600+12:00",
+    }),
+    ALL,
+  );
+  assert.match(
+    out,
+    /^Current time: Mon 03 Aug 09:11 \(local boat time\)\.$/m,
+    "9:11 local, correct weekday, offset ignored (already local)",
+  );
+});
+
+test("current time: is the first line, before boat data", () => {
+  const out = buildContext(
+    reader({
+      "environment.time.localTime": "2026-08-03T09:11:00+12:00",
+      "environment.depth.belowKeel": 4.2,
+    }),
+    ALL,
+  );
+  assert.ok(
+    out.startsWith("Current time:"),
+    "time comes first so the model reads it up front",
+  );
+});
+
+test("current time: node-wrapped value and a negative offset", () => {
+  const out = buildContext(
+    reader({
+      "environment.time.localTime": { value: "2026-12-25T18:30:00-05:00" },
+    }),
+    ALL,
+  );
+  assert.match(out, /^Current time: Fri 25 Dec 18:30 \(local boat time\)\.$/m);
+});
+
+test("current time: omitted when no local-time path is published", () => {
+  // Boats without a timezone plugin simply get no time line (best-effort).
+  const out = buildContext(reader({ "environment.depth.belowKeel": 4.2 }), ALL);
+  assert.doesNotMatch(out, /Current time:/);
+});
+
+test("current time: omits invalid-calendar and invalid-suffix values", () => {
+  // Impossible calendar/time fields and trailing garbage must not render a
+  // bogus time — the line is dropped entirely rather than spoken as nonsense.
+  const bogus = [
+    "2026-13-45T99:99+12:00", // month 13, day 45, 99:99
+    "2026-00-00T25:61Z", // month/day 00, 25:61
+    "2026-02-30T12:00Z", // Feb 30 doesn't exist
+    "2026-08-03T24:00Z", // hour 24
+    "2026-08-03T09:41garbage", // trailing suffix garbage
+    "2026-08-03 09:41", // space instead of T
+  ];
+  for (const bad of bogus) {
+    const out = buildContext(
+      reader({ "environment.time.localTime": bad }),
+      ALL,
+    );
+    assert.doesNotMatch(out, /Current time:/, `must omit ${bad}`);
+  }
+});
+
+test("current time: tolerates a malformed localTime string", () => {
+  for (const bad of ["not-a-date", "2026-08", "", 42, null, { value: 99 }]) {
+    assert.doesNotThrow(() =>
+      buildContext(reader({ "environment.time.localTime": bad }), ALL),
+    );
+    const out = buildContext(
+      reader({ "environment.time.localTime": bad }),
+      ALL,
+    );
+    assert.doesNotMatch(out, /Current time:.*(undefined|NaN)/);
+  }
+});
+
 test("converts SI navigation values to nautical units", () => {
   const out = buildContext(
     reader({
