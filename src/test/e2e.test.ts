@@ -88,6 +88,30 @@ test("speaks the LLM reply back to the satellite that asked", async () => {
   await llm.close();
 });
 
+test("default system prompt is open-topic yet keeps replies speakable", async () => {
+  const llm = await startFakeLlm("Kiribati is a Pacific island nation…");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(configFor(llm.baseUrl)); // default systemPrompt
+  mock.provideSay();
+  mock.sendCommand("tell me about kiribati", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.ok(system, "a system message should be present");
+  // Not restricted to the boat — general questions are explicitly allowed.
+  assert.match(system.content, /not restricted to boat topics/i);
+  assert.match(system.content, /destinations|geography|general knowledge/i);
+  // Still speakable: markup must be forbidden (TTS reads it aloud).
+  assert.match(system.content, /no markdown/i);
+  // The STT-lossy framing is retained.
+  assert.match(system.content, /misheard|transcribed from speech/i);
+
+  plugin.stop();
+  await llm.close();
+});
+
 test("feeds converted boat data to the model, not raw SI", async () => {
   const llm = await startFakeLlm("Ok.");
   const mock = createMockApp();
@@ -154,7 +178,7 @@ test("start() survives a partial config (the 0.2.0 crash)", async () => {
   assert.equal(llm.requests[0]!.model, "kept", "user's value must survive");
   assert.equal(
     llm.requests[0]!.max_tokens,
-    200,
+    500,
     "missing field must come from defaults",
   );
 
@@ -497,7 +521,7 @@ test("exposes a config schema that matches the runtime defaults", async () => {
 
   // The schema defaults are the source the merge reads from, so a drift here
   // is what caused the 0.2.0 crash to be invisible until runtime.
-  assert.equal(schema.properties.llm!.properties!.maxTokens!.default, 200);
+  assert.equal(schema.properties.llm!.properties!.maxTokens!.default, 500);
   assert.equal(schema.properties.llm!.properties!.timeoutMs!.default, 30000);
   assert.equal(schema.properties.replyTargetOriginOnly!.default, true);
   assert.equal(schema.properties.speakErrors!.default, true);
