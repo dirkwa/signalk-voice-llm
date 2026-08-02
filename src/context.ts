@@ -52,11 +52,55 @@ export interface ContextGroups {
   electrical: boolean;
 }
 
+// Render the boat's current LOCAL date+time for the model, so it can reason
+// about "now", "tonight", "the next high water" etc. Sourced from
+// environment.time.localTime (published by a timezone plugin, e.g.
+// @yachteye/signalk-timezone-plugin) — an ISO string that ALREADY carries the
+// local wall-clock and offset, e.g. "2026-08-03T09:11:57.600+12:00". We format
+// from that string's own fields (not via new Date(), which would re-interpret
+// it in the server's timezone). Returns "" if the path is absent.
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+function currentTimeLine(reader: SelfPathReader): string {
+  const iso = str(reader.get("environment.time.localTime"));
+  if (!iso) return "";
+  // Match "YYYY-MM-DDTHH:MM" with an optional trailing offset; keep the local
+  // wall-clock components verbatim.
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso);
+  if (!m) return "";
+  const [, y, mon, day, hh, mm] = m;
+  const monIdx = Number(mon) - 1;
+  const monName = MONTHS[monIdx] ?? mon;
+  // Weekday from the date parts (UTC math on the local calendar date is fine —
+  // we only need the day name, and the date fields are already local).
+  const wd = WEEKDAYS[new Date(`${y}-${mon}-${day}T00:00:00Z`).getUTCDay()];
+  const date = `${wd ? wd + " " : ""}${day} ${monName}`;
+  return `Current time: ${date} ${hh}:${mm} (local boat time).`;
+}
+
 export function buildContext(
   reader: SelfPathReader,
   groups: ContextGroups,
 ): string {
   const lines: string[] = [];
+
+  // Always first: the model needs to know what time it is now, independent of
+  // any group toggle. Omitted only when no local-time path is published.
+  const timeLine = currentTimeLine(reader);
+  if (timeLine) lines.push(timeLine);
 
   if (groups.navigation) {
     const nav: string[] = [];
