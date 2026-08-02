@@ -4,9 +4,10 @@ Answer a boat's spoken voice commands with a local or remote LLM.
 
 This SignalK plugin closes the loop on the [signalk-wyoming](https://github.com/hoeken/signalk-wyoming)
 voice family: it subscribes to the `voice.command` path (published when a
-Wyoming satellite transcribes speech), asks an **OpenAI-compatible** LLM for a
-short answer, and speaks the reply back through `say()`. Fully offline if you
-run the LLM locally.
+Wyoming satellite transcribes speech), asks an **OpenAI-compatible** LLM, and
+speaks the reply back through `say()`. It answers questions about the vessel
+from live boat data _and_ ranges freely over sailing, destinations, geography,
+and general knowledge. Fully offline if you run the LLM locally.
 
 ```
 you speak  →  voice.command (SignalK)
@@ -17,6 +18,11 @@ you speak  →  voice.command (SignalK)
 ## What it does
 
 - **Subscribes to `voice.command`** and, for each utterance, asks the LLM.
+- **Answers anything, not just boat status** — the default prompt makes it a
+  knowledgeable companion: ask about the depth or the anchor, but also about a
+  passage to Fiji, what Kiribati is like, or how to cook fish aboard. It uses
+  live boat data when the question is about the vessel and speaks a natural,
+  spoken-length reply (short for simple questions, a paragraph when warranted).
 - **Gives the LLM live boat context** — a compact, unit-friendly snapshot of
   the vessel so it can answer questions about it. Selectable groups:
   - **Navigation** — position, speed over ground, course, heading, depth
@@ -33,7 +39,8 @@ you speak  →  voice.command (SignalK)
   key — off by default, since tides have no keyless source. Best-effort: any
   source that can't be fetched is simply omitted.
 - **Speaks the reply** via signalk-wyoming's `say()`, defaulting to the
-  satellite that asked. Answers are prompted to be short (they are read aloud).
+  satellite that asked. The prompt keeps replies **speakable** — plain prose,
+  no markdown or lists — since they are read aloud by text-to-speech.
 - **STT-robust** — the system prompt tells the model the text came from
   speech-to-text and may be misheard, so it interprets nautically
   (e.g. "debt" → "depth").
@@ -60,30 +67,38 @@ you speak  →  voice.command (SignalK)
 
 In the plugin config:
 
-| Field                                                | Notes                                                                             |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `llm.provider`                                       | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                            |
-| `llm.baseUrl`                                        | used by `local`/`custom` (a hosted provider overrides it)                         |
-| `llm.model`                                          | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`) |
-| `llm.apiKey`                                         | empty for local; required for a hosted provider                                   |
-| `llm.temperature` / `maxTokens` / `timeoutMs`        | generation + request tuning                                                       |
-| `systemPrompt`                                       | how the assistant behaves (kept short — replies are spoken)                       |
-| `context.*`                                          | which boat-data groups to feed the LLM                                            |
-| `weather.enabled`                                    | fetch a live Open-Meteo forecast for the boat's position                          |
-| `weather.forecastHours`                              | how far ahead to summarise (1–48)                                                 |
-| `weather.marine`                                     | also include sea state (waves + swell) from Open-Meteo Marine                     |
-| `weather.tidesApiKey`                                | a free WorldTides key enables next high/low water (blank = off)                   |
-| `weather.baseUrl` / `marineBaseUrl` / `tidesBaseUrl` | override hosts for a self-hosted Open-Meteo / WorldTides instance                 |
-| `weather.timeoutMs` / `cacheMs`                      | request timeout; reuse window between fetches                                     |
-| `replyTargetOriginOnly`                              | reply only to the satellite that asked (else all)                                 |
-| `speakErrors`                                        | speak a short error if the LLM is unreachable                                     |
+| Field                                                | Notes                                                                                                                   |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `llm.provider`                                       | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                                                                  |
+| `llm.baseUrl`                                        | used by `local`/`custom` (a hosted provider overrides it)                                                               |
+| `llm.model`                                          | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`)                                       |
+| `llm.apiKey`                                         | empty for local; required for a hosted provider                                                                         |
+| `llm.temperature` / `maxTokens` / `timeoutMs`        | generation + request tuning                                                                                             |
+| `systemPrompt`                                       | how the assistant behaves (open-topic by default; edit to make it terser or boat-only — keep it speakable, no markdown) |
+| `context.*`                                          | which boat-data groups to feed the LLM                                                                                  |
+| `weather.enabled`                                    | fetch a live Open-Meteo forecast for the boat's position                                                                |
+| `weather.forecastHours`                              | how far ahead to summarise (1–48)                                                                                       |
+| `weather.marine`                                     | also include sea state (waves + swell) from Open-Meteo Marine                                                           |
+| `weather.tidesApiKey`                                | a free WorldTides key enables next high/low water (blank = off)                                                         |
+| `weather.baseUrl` / `marineBaseUrl` / `tidesBaseUrl` | override hosts for a self-hosted Open-Meteo / WorldTides instance                                                       |
+| `weather.timeoutMs` / `cacheMs`                      | request timeout; reuse window between fetches                                                                           |
+| `replyTargetOriginOnly`                              | reply only to the satellite that asked (else all)                                                                       |
+| `speakErrors`                                        | speak a short error if the LLM is unreachable                                                                           |
 
 ## Notes
 
+- **Local vs hosted.** A local model is private and works offline but is
+  smaller; a hosted provider is far more capable for open-ended questions
+  (destinations, geography) at the cost of internet and some latency. Free
+  hosted tiers can rate-limit under load — if a reply fails, retry or switch
+  models. The question and boat snapshot leave the boat only for hosted
+  providers.
 - The LLM's **first** request after a load/restart is slow (model + CUDA
   warm-up), then fast.
 - Recommended small local model that fits ~8 GB VRAM:
   `Qwen2.5-7B-Instruct` (Q4_K_M).
+- `maxTokens` bounds reply length (default 500 — room for a spoken paragraph);
+  lower it for terser, faster replies.
 
 ## Roadmap
 
