@@ -5,6 +5,11 @@
 // shipped or nearly shipped: the partial-config crash, the discarded
 // AbortError, and the reply that arrives after the plugin was stopped.
 
+// Tide/forecast times are rendered in the server's local timezone; pin it to
+// UTC so the HH:MM assertions are deterministic regardless of the CI machine's
+// zone. Must be set before the plugin module is require()d below.
+process.env.TZ = "UTC";
+
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";

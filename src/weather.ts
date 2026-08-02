@@ -106,6 +106,23 @@ function msToKn(ms: number): number {
   return ms * MS2KN;
 }
 
+// Format a UTC epoch as a local "HH:MM" for the skipper. Provider/tide
+// timestamps are UTC; we render them in the SignalK server's timezone (set
+// from the boat's TZ, e.g. Pacific/Fiji) so spoken times match the ship's
+// clock. Falls back to UTC only if the runtime lacks Intl support. Exported so
+// context.ts formats tide times the same way.
+export function hhmmLocal(ms: number): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toISOString().slice(11, 16);
+  }
+}
+
 // Format the first forecast entry as "now" plus a few later samples into a
 // short, TTS-friendly block. Returns "" if there's nothing usable.
 export function formatForecast(
@@ -143,12 +160,9 @@ export function formatForecast(
   for (const i of picks) {
     const f = forecasts[i];
     if (!f) continue;
-    // Normalise to UTC and label it, so an offset-bearing timestamp isn't read
-    // as boat-local and a bare HH:MM isn't mis-spoken as local time.
+    // Render the UTC forecast time in the boat's local timezone.
     const ms = typeof f.date === "string" ? Date.parse(f.date) : NaN;
-    const time = isFinite(ms)
-      ? `${new Date(ms).toISOString().slice(11, 16)} UTC`
-      : "";
+    const time = isFinite(ms) ? hhmmLocal(ms) : "";
     const parts: string[] = [];
     const ws = n(f.wind?.speedTrue);
     const wd = compassRad(f.wind?.directionTrue);
