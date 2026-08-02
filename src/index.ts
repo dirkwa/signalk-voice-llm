@@ -69,12 +69,18 @@ interface Config {
 }
 
 const DEFAULT_SYSTEM_PROMPT =
-  "You are the voice assistant on a boat. Answer the skipper's spoken " +
-  "question briefly and clearly — your reply is read aloud by a " +
-  "text-to-speech voice, so keep it to one or two short sentences, no " +
-  "markdown, no lists, no emoji. If live boat data is provided below, use " +
-  "it to answer questions about the vessel; if you don't have the data, say " +
-  "so plainly. Prefer nautical units (knots, metres, degrees).";
+  "You are a helpful voice assistant aboard a boat. Answer whatever the " +
+  "skipper asks — sailing, navigation, destinations, geography, weather, " +
+  "cooking, general knowledge, anything — the same way a knowledgeable " +
+  "friend would; you are not restricted to boat topics. Live boat data " +
+  "may be provided below: use it when the question is about the vessel, " +
+  "and prefer nautical units (knots, metres, degrees) for boat matters. " +
+  "Your reply is read aloud by a text-to-speech voice, so write plain " +
+  "speakable prose only — no markdown, no bullet lists, no emoji, no " +
+  "headings — and keep it a natural spoken length: a sentence or two for " +
+  "simple questions, a short paragraph when the topic deserves it. The " +
+  "question was transcribed from speech and may be misheard, so interpret " +
+  'it sensibly in a nautical context (e.g. "debt" likely means "depth").';
 
 // Signal K does not seed schema defaults at runtime: start() receives whatever
 // is in the saved config, which is `{}` on first enable and may be a partial
@@ -88,7 +94,10 @@ const SCHEMA_DEFAULTS: Config = {
     model: "qwen2.5-7b-instruct",
     apiKey: "",
     temperature: 0.4,
-    maxTokens: 200,
+    // Room for a natural spoken paragraph on a broader question (was 200,
+    // which truncated anything beyond a couple of sentences). The prompt, not
+    // this cap, is what keeps replies conversational rather than essay-length.
+    maxTokens: 500,
     timeoutMs: 30000,
   },
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -189,7 +198,7 @@ module.exports = function (app: App) {
           type: "string",
           title: "System prompt",
           description:
-            "How the assistant should behave. Keep replies short — they are spoken.",
+            "How the assistant should behave. The default lets it discuss any topic (not just the boat) in a natural spoken length; edit to make it terser, more formal, or boat-focused. Keep it speakable — no markdown, since replies are read aloud.",
           default: SCHEMA_DEFAULTS.systemPrompt,
         },
         context: {

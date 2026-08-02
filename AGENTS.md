@@ -40,10 +40,13 @@ voice.command (signalk-wyoming)  →  buildContext()  →  chat()  →  say()
   level deep on purpose — a plain spread would leave a newly-added `llm.*`
   field undefined for existing users. Never read `config.llm.*` off the raw
   argument.
-- **Replies are spoken, not read.** The system prompt constrains the model to
-  one or two short sentences, no markdown, no lists, no emoji. Any change that
-  invites longer or formatted output is a regression — TTS reads punctuation
-  and markup aloud.
+- **Replies are spoken, not read.** The system prompt must keep output
+  speakable: no markdown, no bullet lists, no headings, no emoji — TTS reads
+  punctuation and markup aloud. Length is deliberately conversational (a
+  sentence or two for simple questions, a short paragraph when warranted), not
+  hard-capped; the assistant is a general companion, not boat-topics-only.
+  A change that reintroduces markup/formatting is a regression; a change that
+  lets it answer non-boat questions is intended.
 - **Speech-to-text input is lossy.** The prompt tells the model its input came
   from STT and may be misheard, so it should interpret nautically ("debt" →
   "depth"). Keep that framing.
