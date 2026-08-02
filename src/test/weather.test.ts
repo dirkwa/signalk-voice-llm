@@ -193,3 +193,17 @@ test("formatForecast renders later sample times in local time", () => {
   const out = formatForecast(SAMPLE, 12);
   assert.match(out, /Later: 09:00 /, "sample time (local; TZ=UTC in tests)");
 });
+
+test("formatForecast converts sample times to the boat's local timezone", () => {
+  // Prove the conversion actually happens (mirrors the tide test): in a +12
+  // zone, SAMPLE[1].date (09:00Z) must render as 21:00 local, with no UTC label.
+  const savedTz = process.env.TZ;
+  process.env.TZ = "Pacific/Fiji";
+  try {
+    const out = formatForecast(SAMPLE, 12);
+    assert.match(out, /Later: 21:00 /, "09:00Z -> 21:00 in +12");
+    assert.doesNotMatch(out, /09:00|UTC/);
+  } finally {
+    process.env.TZ = savedTz;
+  }
+});
