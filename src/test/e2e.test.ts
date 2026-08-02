@@ -791,3 +791,54 @@ test("custom provider sends to the configured URL; hosted overrides it", async (
   plugin.stop();
   await llm.close();
 });
+
+test("the network-isolation guard blocks a non-loopback fetch", async () => {
+  // Proves the harness guard is live: a direct fetch to a real host must throw
+  // rather than reach the internet. This is what turns an accidental live call
+  // in a future weather test into a loud failure instead of silent flakiness.
+  await assert.rejects(
+    () => fetch("https://marine-api.open-meteo.com/v1/marine?latitude=0"),
+    /network isolation: blocked fetch to non-loopback host/,
+  );
+  // Loopback still works (the stubs rely on it).
+  const llm = await startFakeLlm("ok");
+  const res = await fetch(`${llm.baseUrl}/models`).catch(() => null);
+  assert.ok(res, "loopback fetch must not be blocked");
+  await llm.close();
+});
+
+test("a leaked marine fetch is blocked yet the reply still comes", async () => {
+  // The exact footgun: marineBaseUrl set to "" bypasses configFor's stub
+  // injection and, marine being on by default, falls back to the live host.
+  // The guard blocks that fetch; because fetchMarine's result is best-effort
+  // (getJson catches, safeFormat backstops), the marine line is simply dropped
+  // and the assistant still answers — the forecast (pointed at the stub) and
+  // the reply are unaffected. No live host is ever contacted.
+  const llm = await startFakeLlm("Answered without sea state.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  // marineBaseUrl: "" defeats the stub injection on purpose.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { baseUrl: meteo.baseUrl, marineBaseUrl: "" },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "the reply never came");
+
+  assert.equal(mock.spoken[0]!.text, "Answered without sea state.");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Sea state/, "leaked marine is dropped");
+  assert.deepEqual(mock.errorLog, [], "a blocked marine fetch is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});

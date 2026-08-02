@@ -9,6 +9,48 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 
+// --- Network isolation guard --------------------------------------------
+//
+// Every fetch in these tests must go to a loopback stub, never the real
+// internet. A test that forgets to point a weather source at the stub (e.g.
+// sets marineBaseUrl to "" so it falls back to the live Open-Meteo host, or
+// omits weather.baseUrl entirely) would otherwise hit the real API — a silent
+// source of CI flakiness that masquerades as a passing test. This wraps the
+// global fetch so any non-loopback host throws immediately, turning that
+// mistake into a loud, obvious failure at the call site.
+//
+// Installed as a module side-effect: only e2e.test.ts imports this harness,
+// and it is the only test file that makes network calls, so the guard covers
+// exactly the file that needs it. The pure formatter/provider tests never
+// call fetch, so they are unaffected.
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : (input as Request).url;
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    // A malformed URL is itself a test bug — let the real fetch surface it.
+  }
+  if (host && !LOOPBACK.has(host)) {
+    throw new Error(
+      `test network isolation: blocked fetch to non-loopback host "${host}" ` +
+        `(${url}). Point this source at a loopback stub (startFakeOpenMeteo / ` +
+        `startFakeLlm), e.g. via weather.baseUrl / marineBaseUrl / tidesBaseUrl.`,
+    );
+  }
+  return realFetch(input, init);
+}) as typeof fetch;
+
 // --- Fake LLM ------------------------------------------------------------
 
 export interface LlmRequest {
