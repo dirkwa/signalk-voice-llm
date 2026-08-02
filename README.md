@@ -102,6 +102,12 @@ In the plugin config:
 
 ## Roadmap
 
+- Prefer the SignalK v2 Weather API (`/signalk/v2/api/weather`) when a weather
+  provider is registered on the server, falling back to direct Open-Meteo
+  otherwise — so a user's own weather source is reused instead of always
+  fetching independently. (Today the plugin fetches Open-Meteo directly, since
+  that API returns "No providers registered" until a provider plugin is
+  installed, and there is no SignalK tide API yet.)
 - Intent/actuation (voice → SignalK PUTs) as a separate concern.
 - Conversation memory / follow-ups.
 
