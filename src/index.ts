@@ -356,7 +356,7 @@ module.exports = function (app: App) {
             : undefined;
 
         const llmCfg: LlmConfig = {
-          baseUrl: resolveBaseUrl(config.llm.provider, config.llm.baseUrl),
+          baseUrl: activeBaseUrl,
           model: config.llm.model,
           apiKey: config.llm.apiKey || undefined,
           temperature: config.llm.temperature,

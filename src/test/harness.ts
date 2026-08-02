@@ -36,15 +36,20 @@ globalThis.fetch = (async (
         ? input.href
         : (input as Request).url;
   let host = "";
+  let parsed: URL | undefined;
   try {
-    host = new URL(url).hostname;
+    parsed = new URL(url);
+    host = parsed.hostname;
   } catch {
     // A malformed URL is itself a test bug — let the real fetch surface it.
   }
   if (host && !LOOPBACK.has(host)) {
+    // Log only origin + path — the tides URL carries the WorldTides key as a
+    // query param, and printing the full URL would leak it into CI output.
+    const safeUrl = parsed ? `${parsed.origin}${parsed.pathname}` : "<invalid>";
     throw new Error(
       `test network isolation: blocked fetch to non-loopback host "${host}" ` +
-        `(${url}). Point this source at a loopback stub (startFakeOpenMeteo / ` +
+        `(${safeUrl}). Point this source at a loopback stub (startFakeOpenMeteo / ` +
         `startFakeLlm), e.g. via weather.baseUrl / marineBaseUrl / tidesBaseUrl.`,
     );
   }

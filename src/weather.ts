@@ -258,7 +258,11 @@ export function formatTides(data: TidesResponse, nowSec: number): string {
         e !== null &&
         typeof e === "object" &&
         typeof (e as TideExtreme).dt === "number" &&
-        (e as TideExtreme).dt! >= nowSec,
+        (e as TideExtreme).dt! >= nowSec &&
+        // Require a renderable date too: slice(0, 2) runs before the loop's
+        // date check, so without this a dateless extreme could take a slot and
+        // push out a valid later one, yielding an empty/short tide line.
+        typeof (e as TideExtreme).date === "string",
     )
     .slice(0, 2);
   const items: string[] = [];

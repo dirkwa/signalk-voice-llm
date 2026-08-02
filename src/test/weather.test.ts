@@ -124,6 +124,24 @@ test("formatTides tolerates malformed elements without throwing", () => {
   assert.match(out, /low at 15:00/, "the good element still comes through");
 });
 
+test("formatTides skips dateless extremes and keeps a valid later one", () => {
+  // slice(0, 2) runs before the date check, so entries with a valid dt but no
+  // renderable date must be filtered out first — otherwise they'd take the two
+  // slots and drop the valid third, yielding an empty/short line.
+  const now = 1000;
+  const out = formatTides(
+    {
+      extremes: [
+        { dt: now + 100, type: "High" }, // valid dt, no date
+        { dt: now + 200, date: 42 as unknown as string, type: "Low" }, // bad date
+        { dt: now + 300, date: "1970-01-12T18:00", height: 1.1, type: "High" },
+      ],
+    },
+    now,
+  );
+  assert.match(out, /^Tides: next high at 18:00/, "the valid extreme survives");
+});
+
 test("WEATHER_DEFAULTS point marine and tides at the right hosts", () => {
   // The marine API lives on a DIFFERENT subdomain from the forecast host (the
   // forecast host 404s on /v1/marine). Guard the default so a typo can't

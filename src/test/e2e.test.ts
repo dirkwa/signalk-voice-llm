@@ -34,13 +34,20 @@ const pluginFactory = require(path.join(__dirname, "..", "index.js")) as (
 
 function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
   // When a test points weather at the loopback stub via weather.baseUrl, also
-  // route the marine fetch there (the stub is path-aware) unless the test set
-  // its own marineBaseUrl — otherwise marine would hit the real Open-Meteo host
-  // over the network. Tides stay off (no tidesApiKey) unless a test opts in.
+  // route the marine AND tides fetches there (the stub is path-aware) unless
+  // the test set its own host — otherwise they'd hit the real Open-Meteo /
+  // WorldTides hosts. A test can still opt out per-source by setting the host
+  // explicitly (e.g. marineBaseUrl: "" to exercise the isolation guard).
   const w = over.weather as Record<string, unknown> | undefined;
   const weather =
-    w && typeof w.baseUrl === "string" && w.marineBaseUrl === undefined
-      ? { ...w, marineBaseUrl: w.baseUrl }
+    w && typeof w.baseUrl === "string"
+      ? {
+          ...(w.marineBaseUrl === undefined
+            ? { marineBaseUrl: w.baseUrl }
+            : {}),
+          ...(w.tidesBaseUrl === undefined ? { tidesBaseUrl: w.baseUrl } : {}),
+          ...w,
+        }
       : w;
   return {
     llm: {
