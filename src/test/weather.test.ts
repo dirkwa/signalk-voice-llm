@@ -1,8 +1,40 @@
-// Marine + tide formatting — pure functions, no network.
+// Marine + tide formatting (pure functions) and fetchWeather caching, driven
+// through the injectable WeatherDeps (stub fetch + fixed clock) — no network.
 
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { formatMarine, formatTides, WEATHER_DEFAULTS } from "../weather";
+import {
+  fetchWeather,
+  formatForecast,
+  formatMarine,
+  formatTides,
+  WEATHER_DEFAULTS,
+  type WeatherConfig,
+} from "../weather";
+
+// A stub fetch that records calls and answers forecast/marine/tides bodies by
+// path, so the cache tests can count refetches without touching the network.
+function stubFetch(bodyByPath?: (path: string) => unknown) {
+  const calls: string[] = [];
+  const fetchImpl = (async (input: string | URL) => {
+    const url = typeof input === "string" ? input : input.href;
+    calls.push(url);
+    const path = new URL(url).pathname;
+    const body = bodyByPath
+      ? bodyByPath(path)
+      : path.startsWith("/v1/marine")
+        ? { current: { wave_height: 1, swell_wave_height: 0.5 } }
+        : { current: { temperature_2m: 15, wind_speed_10m: 10 } };
+    return { ok: true, json: async () => body } as Response;
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+const BASE_CFG: WeatherConfig = {
+  ...WEATHER_DEFAULTS,
+  marine: false, // keep cache tests to a single forecast fetch unless stated
+  cacheMs: 600000,
+};
 
 test("formatMarine summarises waves and swell in nautical units", () => {
   const out = formatMarine({
@@ -104,4 +136,88 @@ test("WEATHER_DEFAULTS point marine and tides at the right hosts", () => {
   assert.equal(WEATHER_DEFAULTS.tidesBaseUrl, "https://www.worldtides.info");
   assert.equal(WEATHER_DEFAULTS.tidesApiKey, "", "tides off by default");
   assert.equal(WEATHER_DEFAULTS.marine, true, "marine on by default");
+});
+
+test("formatForecast summarises current + a few forecast points", () => {
+  const out = formatForecast(
+    {
+      current: {
+        temperature_2m: 16.8,
+        wind_speed_10m: 12,
+        wind_direction_10m: 225,
+        weather_code: 3,
+        pressure_msl: 1016,
+      },
+      hourly: {
+        time: ["2026-08-01T00:00", "2026-08-01T04:00", "2026-08-01T08:00"],
+        wind_speed_10m: [12, 18, 20],
+        wind_gusts_10m: [16, 24, 28],
+        wind_direction_10m: [225, 240, 250],
+        precipitation_probability: [10, 40, 60],
+        temperature_2m: [16, 15, 17],
+      },
+    },
+    12,
+  );
+  assert.match(out, /^Now: overcast, 17°C, wind SW 12 kn, 1016 hPa\./m);
+  assert.match(out, /Later:/);
+  assert.match(out, /gusting/, "gusts are summarised");
+  assert.match(out, /% rain/, "precipitation >= 20% is shown");
+  assert.doesNotMatch(out, /undefined|NaN|weather_code/);
+});
+
+// The cache is a module-level singleton shared across tests in this file. Each
+// cache test uses a DISTINCT position so its key can't collide with another
+// test's leftover entry (position is part of the key), keeping them isolated
+// without needing a reset hook.
+test("fetchWeather reuses the cache within cacheMs", async () => {
+  const { fetchImpl, calls } = stubFetch();
+  const deps = { fetchImpl, now: () => 1_000_000 };
+  const a = await fetchWeather(10.0, 10.0, BASE_CFG, deps);
+  const b = await fetchWeather(10.0, 10.0, BASE_CFG, deps);
+  assert.equal(a, b);
+  assert.equal(calls.length, 1, "second call within cacheMs must not refetch");
+});
+
+test("a forecastHours change busts the cache", async () => {
+  const { fetchImpl, calls } = stubFetch();
+  const deps = { fetchImpl, now: () => 1_000_000 };
+  await fetchWeather(20.0, 20.0, { ...BASE_CFG, forecastHours: 12 }, deps);
+  await fetchWeather(20.0, 20.0, { ...BASE_CFG, forecastHours: 6 }, deps);
+  assert.equal(calls.length, 2, "changing forecastHours must refetch");
+});
+
+test("a marineBaseUrl change busts the cache", async () => {
+  const { fetchImpl, calls } = stubFetch();
+  const deps = { fetchImpl, now: () => 1_000_000 };
+  const cfg = { ...BASE_CFG, marine: true };
+  await fetchWeather(30.0, 30.0, cfg, deps);
+  const before = calls.length;
+  await fetchWeather(
+    30.0,
+    30.0,
+    { ...cfg, marineBaseUrl: "https://marine.example.test" },
+    deps,
+  );
+  assert.ok(
+    calls.length > before,
+    "changing marineBaseUrl must refetch, not serve the old block",
+  );
+});
+
+test("fetchWeather does not cache when tides are on", async () => {
+  const { fetchImpl, calls } = stubFetch((path) =>
+    path.startsWith("/api/v3")
+      ? { extremes: [{ dt: 2_000_000, date: "2026-01-01T06:00", type: "Low" }] }
+      : { current: { temperature_2m: 15, wind_speed_10m: 10 } },
+  );
+  const deps = { fetchImpl, now: () => 1_000_000_000 };
+  const cfg = { ...BASE_CFG, tidesApiKey: "k" };
+  await fetchWeather(40.0, 40.0, cfg, deps);
+  const after1 = calls.length;
+  await fetchWeather(40.0, 40.0, cfg, deps);
+  assert.ok(
+    calls.length > after1,
+    "time-relative tides must refetch every call (never cached)",
+  );
 });

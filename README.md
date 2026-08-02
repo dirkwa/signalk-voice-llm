@@ -48,33 +48,35 @@ you speak  →  voice.command (SignalK)
   - **Local** — an on-boat server: **LM Studio** (Developer → Start Server;
     `http://<host>:1234/v1`), **Ollama** (`http://<host>:11434/v1`),
     llama.cpp, or any compatible gateway. Private and works offline.
-  - **Groq / Cerebras / OpenRouter** — free-tier hosted models, fast enough for
-    voice and far more capable than a small local model. These need internet and
-    an API key (create one in the provider's console), and the question plus the
-    boat snapshot leave the boat. A hosted provider is the way to discuss
-    weather, routes and sailing destinations with a strong model.
+  - **Groq / Cerebras / OpenRouter** — hosted models with a free tier available,
+    fast enough for voice and far more capable than a small local model (larger
+    models may bill per token). These need internet and an API key (create one in
+    the provider's console), and the question plus the boat snapshot leave the
+    boat. A hosted provider is the way to discuss weather, routes and sailing
+    destinations with a strong model.
   - **Custom** — any other OpenAI-compatible URL.
 
 ## Configure
 
 In the plugin config:
 
-| Field                                         | Notes                                                                             |
-| --------------------------------------------- | --------------------------------------------------------------------------------- |
-| `llm.provider`                                | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                            |
-| `llm.baseUrl`                                 | used by `local`/`custom` (a hosted provider overrides it)                         |
-| `llm.model`                                   | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`) |
-| `llm.apiKey`                                  | empty for local; required for a hosted provider                                   |
-| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                                       |
-| `systemPrompt`                                | how the assistant behaves (kept short — replies are spoken)                       |
-| `context.*`                                   | which boat-data groups to feed the LLM                                            |
-| `weather.enabled`                             | fetch a live Open-Meteo forecast for the boat's position                          |
-| `weather.forecastHours`                       | how far ahead to summarise (1–48)                                                 |
-| `weather.marine`                              | also include sea state (waves + swell) from Open-Meteo Marine                     |
-| `weather.tidesApiKey`                         | a free WorldTides key enables next high/low water (blank = off)                   |
-| `weather.timeoutMs` / `cacheMs`               | request timeout; reuse window between fetches                                     |
-| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)                                 |
-| `speakErrors`                                 | speak a short error if the LLM is unreachable                                     |
+| Field                                                | Notes                                                                             |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `llm.provider`                                       | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                            |
+| `llm.baseUrl`                                        | used by `local`/`custom` (a hosted provider overrides it)                         |
+| `llm.model`                                          | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`) |
+| `llm.apiKey`                                         | empty for local; required for a hosted provider                                   |
+| `llm.temperature` / `maxTokens` / `timeoutMs`        | generation + request tuning                                                       |
+| `systemPrompt`                                       | how the assistant behaves (kept short — replies are spoken)                       |
+| `context.*`                                          | which boat-data groups to feed the LLM                                            |
+| `weather.enabled`                                    | fetch a live Open-Meteo forecast for the boat's position                          |
+| `weather.forecastHours`                              | how far ahead to summarise (1–48)                                                 |
+| `weather.marine`                                     | also include sea state (waves + swell) from Open-Meteo Marine                     |
+| `weather.tidesApiKey`                                | a free WorldTides key enables next high/low water (blank = off)                   |
+| `weather.baseUrl` / `marineBaseUrl` / `tidesBaseUrl` | override hosts for a self-hosted Open-Meteo / WorldTides instance                 |
+| `weather.timeoutMs` / `cacheMs`                      | request timeout; reuse window between fetches                                     |
+| `replyTargetOriginOnly`                              | reply only to the satellite that asked (else all)                                 |
+| `speakErrors`                                        | speak a short error if the LLM is unreachable                                     |
 
 ## Notes
 

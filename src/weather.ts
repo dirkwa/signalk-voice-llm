@@ -313,10 +313,18 @@ export async function fetchWeather(
   // ("weather moves slowly"); a time-relative answer does not.
   const cacheable = !cfg.tidesApiKey;
   // Cache on ~1 km-rounded position (a drifting/anchored boat reuses the fetch;
-  // a passage that moves refreshes). Key also on the base URL and the enabled
-  // sources so a config change never serves a stale/partial cached block.
+  // a passage that moves refreshes). Key also on every input that changes the
+  // formatted block — base URL, forecast window, and the marine host/on-off —
+  // so editing any of them in the config UI busts the module-level cache
+  // instead of serving a block computed under the old setting for up to cacheMs.
+  // (The module stays loaded across a plugin stop()/start(), so the cache is
+  // not cleared on a config change; the key is what invalidates it.)
+  const marineBase = cfg.marine
+    ? cfg.marineBaseUrl || WEATHER_DEFAULTS.marineBaseUrl
+    : "";
   const key =
-    `${base}|${lat.toFixed(2)},${lon.toFixed(2)}` + `|m${cfg.marine ? 1 : 0}`;
+    `${base}|${lat.toFixed(2)},${lon.toFixed(2)}` +
+    `|h${cfg.forecastHours}|m${cfg.marine ? 1 : 0}|mb${marineBase}`;
   if (
     cacheable &&
     cfg.cacheMs > 0 &&

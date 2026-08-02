@@ -8,9 +8,10 @@
 //
 // `local` and `custom` both defer to the operator-supplied base URL: `local`
 // for an on-boat server (LM Studio / Ollama), `custom` for anything else that
-// is OpenAI-compatible but not in this table. The remote presets are free-tier
-// hosted models — fast enough for voice and far more capable than a small local
-// model, at the cost of needing internet and sending the query off the boat.
+// is OpenAI-compatible but not in this table. The remote presets are hosted
+// services with a free tier available — fast enough for voice and far more
+// capable than a small local model, at the cost of needing internet and
+// sending the query off the boat. (Larger models on them may bill per token.)
 
 export type ProviderId =
   "local" | "groq" | "cerebras" | "openrouter" | "custom";
@@ -35,19 +36,19 @@ export const PROVIDERS: Record<ProviderId, ProviderPreset> = {
     remote: false,
   },
   groq: {
-    label: "Groq (fast, free tier)",
+    label: "Groq (fast, free tier available)",
     baseUrl: "https://api.groq.com/openai/v1",
     suggestedModel: "llama-3.3-70b-versatile",
     remote: true,
   },
   cerebras: {
-    label: "Cerebras (fast, free tier)",
+    label: "Cerebras (fast, free tier available)",
     baseUrl: "https://api.cerebras.ai/v1",
     suggestedModel: "llama-3.3-70b",
     remote: true,
   },
   openrouter: {
-    label: "OpenRouter (many models, free tier)",
+    label: "OpenRouter (many models, free tier available)",
     baseUrl: "https://openrouter.ai/api/v1",
     suggestedModel: "meta-llama/llama-3.3-70b-instruct:free",
     remote: true,
