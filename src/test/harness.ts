@@ -11,18 +11,16 @@ import type { AddressInfo } from "node:net";
 
 // --- Network isolation guard --------------------------------------------
 //
-// Every fetch in these tests must go to a loopback stub, never the real
-// internet. A test that forgets to point a weather source at the stub (e.g.
-// sets marineBaseUrl to "" so it falls back to the live Open-Meteo host, or
-// omits weather.baseUrl entirely) would otherwise hit the real API — a silent
-// source of CI flakiness that masquerades as a passing test. This wraps the
-// global fetch so any non-loopback host throws immediately, turning that
-// mistake into a loud, obvious failure at the call site.
+// The plugin makes no outbound HTTP of its own: the LLM endpoint is a loopback
+// stub and weather comes in-process via app.weatherApi. This wraps the global
+// fetch so any non-loopback host throws immediately — a standing net that turns
+// an accidental real-host call introduced later into a loud failure instead of
+// silent CI flakiness that masquerades as a passing test.
 //
 // Installed as a module side-effect: only e2e.test.ts imports this harness,
-// and it is the only test file that makes network calls, so the guard covers
-// exactly the file that needs it. The pure formatter/provider tests never
-// call fetch, so they are unaffected.
+// and it is the only test file that makes network calls (to the loopback LLM
+// stub), so the guard covers exactly the file that needs it. The pure
+// formatter/provider tests never call fetch, so they are unaffected.
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (
@@ -49,8 +47,7 @@ globalThis.fetch = (async (
     const safeUrl = parsed ? `${parsed.origin}${parsed.pathname}` : "<invalid>";
     throw new Error(
       `test network isolation: blocked fetch to non-loopback host "${host}" ` +
-        `(${safeUrl}). Point this source at a loopback stub (startFakeOpenMeteo / ` +
-        `startFakeLlm), e.g. via weather.baseUrl / marineBaseUrl / tidesBaseUrl.`,
+        `(${safeUrl}). Point it at a loopback stub (e.g. startFakeLlm).`,
     );
   }
   return realFetch(input, init);
@@ -160,117 +157,6 @@ export async function startFakeLlm(
   };
 }
 
-// --- Fake Open-Meteo -----------------------------------------------------
-
-export interface FakeWeather {
-  /** Base URL to hand the plugin as weather.baseUrl (real fetch reaches it). */
-  baseUrl: string;
-  /** Every request path the plugin fetched, in order (to assert the position). */
-  requests: string[];
-  /** Respond with an HTTP error instead of a forecast. */
-  setStatus(status: number): void;
-  /** Never respond, so the client's own AbortController timeout fires. */
-  setHang(hang: boolean): void;
-  close(): Promise<void>;
-}
-
-const DEFAULT_METEO_BODY = {
-  current: {
-    temperature_2m: 16.8,
-    wind_speed_10m: 12,
-    wind_direction_10m: 225,
-    weather_code: 3,
-    pressure_msl: 1016,
-  },
-  hourly: {
-    time: ["2026-08-01T00:00", "2026-08-01T04:00", "2026-08-01T08:00"],
-    temperature_2m: [16, 15, 17],
-    wind_speed_10m: [12, 18, 20],
-    wind_gusts_10m: [16, 24, 28],
-    wind_direction_10m: [225, 240, 250],
-    precipitation_probability: [10, 40, 60],
-  },
-};
-
-const DEFAULT_MARINE_BODY = {
-  current: {
-    wave_height: 1.2,
-    wave_direction: 300,
-    wave_period: 5.5,
-    swell_wave_height: 0.8,
-    swell_wave_period: 7.2,
-  },
-};
-
-// Two extremes far in the future so formatTides always considers them upcoming
-// regardless of the test clock (the plugin passes the real Date.now()).
-const DEFAULT_TIDES_BODY = {
-  extremes: [
-    { dt: 4102448400, date: "2100-01-01T06:00", height: 1.4, type: "High" },
-    { dt: 4102470000, date: "2100-01-01T12:00", height: 0.2, type: "Low" },
-  ],
-};
-
-/**
- * A real loopback stub for Open-Meteo, mirroring startFakeLlm: the plugin is
- * pointed at this via weather.baseUrl and reaches it over real TCP with the
- * real fetch — so no test-only fetch hook has to live in the shipped module.
- */
-export async function startFakeOpenMeteo(
-  body: Record<string, unknown> = DEFAULT_METEO_BODY,
-): Promise<FakeWeather> {
-  const requests: string[] = [];
-  let status = 200;
-  let hang = false;
-  const openResponses = new Set<http.ServerResponse>();
-
-  const server = http.createServer((req, res) => {
-    req.socket.unref();
-    const url = req.url ?? "";
-    requests.push(url);
-    if (hang) {
-      openResponses.add(res);
-      return; // never respond — the client's timeout must fire
-    }
-    if (status !== 200) {
-      res.writeHead(status);
-      res.end();
-      return;
-    }
-    // Route by path so the same stub can back forecast, marine and tides —
-    // the plugin fetches all three when they're enabled.
-    const payload = url.startsWith("/v1/marine")
-      ? DEFAULT_MARINE_BODY
-      : url.startsWith("/api/v3")
-        ? DEFAULT_TIDES_BODY
-        : body;
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(payload));
-  });
-
-  await new Promise<void>((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve()),
-  );
-  server.unref();
-  const port = (server.address() as AddressInfo).port;
-
-  return {
-    baseUrl: `http://127.0.0.1:${port}`,
-    requests,
-    setStatus(s) {
-      status = s;
-    },
-    setHang(h) {
-      hang = h;
-    },
-    async close() {
-      for (const r of openResponses) r.destroy();
-      openResponses.clear();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
-}
-
 // --- Mock Signal K app ---------------------------------------------------
 
 export interface SpokenUtterance {
@@ -301,6 +187,12 @@ export interface MockApp {
   failSayWith(err: Error): void;
   /** Boat data returned by getSelfPath. */
   selfPaths: Record<string, unknown>;
+  /**
+   * Install a SignalK Weather API on the app (app.weatherApi.getForecasts).
+   * Pass forecast objects to serve, or an Error to make the provider throw
+   * (as an unregistered provider does). Not called => app.weatherApi absent.
+   */
+  setWeather(forecasts: unknown[] | Error): void;
 }
 
 export function createMockApp(
@@ -392,6 +284,14 @@ export function createMockApp(
     },
     failSayWith(err) {
       sayError = err;
+    },
+    setWeather(forecasts) {
+      app.weatherApi = {
+        getForecasts: async () => {
+          if (forecasts instanceof Error) throw forecasts;
+          return forecasts;
+        },
+      };
     },
   };
 }

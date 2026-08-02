@@ -121,6 +121,37 @@ export function buildContext(
     const press = num(reader.get("environment.outside.pressure"));
     if (press !== undefined) env.push(`pressure ${fmt(press / 100, 0)} hPa`);
     if (env.length) lines.push("Environment: " + env.join("; ") + ".");
+
+    // Tides (from a tides plugin, e.g. signalk-tides, under environment.tide.*).
+    // A separate line since it's distinct from live sensor readings: current
+    // height + state, then the next high and low water (whichever is sooner
+    // first, by timestamp).
+    const tide: string[] = [];
+    const tState = str(reader.get("environment.tide.state")); // rising/falling
+    const hNow = num(reader.get("environment.tide.heightNow"));
+    if (hNow !== undefined)
+      tide.push(`${fmt(hNow)} m${tState ? ` and ${tState}` : ""}`);
+    const extremes: { label: string; time?: string; h?: number }[] = [
+      {
+        label: "high",
+        time: str(reader.get("environment.tide.timeHigh")),
+        h: num(reader.get("environment.tide.heightHigh")),
+      },
+      {
+        label: "low",
+        time: str(reader.get("environment.tide.timeLow")),
+        h: num(reader.get("environment.tide.heightLow")),
+      },
+    ]
+      .filter((e) => e.time)
+      .sort((a, b) => (a.time! < b.time! ? -1 : 1));
+    for (const e of extremes) {
+      const hhmm = e.time!.slice(11, 16); // HH:MM (UTC)
+      tide.push(
+        `next ${e.label} water ${hhmm}${e.h !== undefined ? ` (${fmt(e.h)} m)` : ""}`,
+      );
+    }
+    if (tide.length) lines.push("Tide: " + tide.join("; ") + ".");
   }
 
   if (groups.electrical) {
