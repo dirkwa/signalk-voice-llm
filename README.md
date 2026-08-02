@@ -29,15 +29,18 @@ you speak  →  voice.command (SignalK)
   - **Anchor** — anchored?, current vs. watch radius, _drag_ detection
   - **Environment** — apparent/true wind, water/air temperature, pressure
   - **Electrical / tanks** — battery SOC/voltage, fuel + water levels
-- **Fetches live weather + sea state** for the boat's position
-  ([Open-Meteo](https://open-meteo.com), free, no API key) — a local LLM has
-  no internet of its own, so this is how it answers "what's the wind doing
-  tonight?". The current conditions plus a short forecast trend (wind, gusts,
-  rain chance, temperature) are added to the context, along with **sea state**
-  (wave height/period and swell) from the Open-Meteo Marine API. **Tides** (next
-  high/low water) can be added with a free [WorldTides](https://www.worldtides.info)
-  key — off by default, since tides have no keyless source. Best-effort: any
-  source that can't be fetched is simply omitted.
+- **Adds live weather + sea state** for the boat's position from the **SignalK
+  Weather API** — so the assistant can answer "what's the wind doing tonight?"
+  even when the LLM has no internet. Current conditions plus a short forecast
+  trend (wind, gusts, temperature) and **sea state** (wave height/period, swell)
+  are summarised into the context. The data comes from whatever weather-provider
+  plugin you have installed (e.g.
+  [@signalk/open-meteo-provider](https://www.npmjs.com/package/@signalk/open-meteo-provider)) —
+  this plugin owns no API keys or hosts. **Tides** (next high/low water) come
+  from a tides plugin (e.g.
+  [signalk-tides](https://www.npmjs.com/package/signalk-tides)) via
+  `environment.tide.*`. Best-effort: if no provider is installed, the weather
+  block is simply omitted.
 - **Speaks the reply** via signalk-wyoming's `say()`, defaulting to the
   satellite that asked. The prompt keeps replies **speakable** — plain prose,
   no markdown or lists — since they are read aloud by text-to-speech.
@@ -62,28 +65,32 @@ you speak  →  voice.command (SignalK)
     boat. A hosted provider is the way to discuss weather, routes and sailing
     destinations with a strong model.
   - **Custom** — any other OpenAI-compatible URL.
+- **Optional, for weather & tides** — install a SignalK **weather-provider**
+  plugin (recommended:
+  [@signalk/open-meteo-provider](https://www.npmjs.com/package/@signalk/open-meteo-provider),
+  free, no key) and a **tides** plugin
+  ([signalk-tides](https://www.npmjs.com/package/signalk-tides)). Without them,
+  the weather/tide lines are simply skipped. These are listed under
+  `signalk.recommends`, so the App Store suggests them.
 
 ## Configure
 
 In the plugin config:
 
-| Field                                                | Notes                                                                                                                   |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `llm.provider`                                       | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                                                                  |
-| `llm.baseUrl`                                        | used by `local`/`custom` (a hosted provider overrides it)                                                               |
-| `llm.model`                                          | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`)                                       |
-| `llm.apiKey`                                         | empty for local; required for a hosted provider                                                                         |
-| `llm.temperature` / `maxTokens` / `timeoutMs`        | generation + request tuning                                                                                             |
-| `systemPrompt`                                       | how the assistant behaves (open-topic by default; edit to make it terser or boat-only — keep it speakable, no markdown) |
-| `context.*`                                          | which boat-data groups to feed the LLM                                                                                  |
-| `weather.enabled`                                    | fetch a live Open-Meteo forecast for the boat's position                                                                |
-| `weather.forecastHours`                              | how far ahead to summarise (1–48)                                                                                       |
-| `weather.marine`                                     | also include sea state (waves + swell) from Open-Meteo Marine                                                           |
-| `weather.tidesApiKey`                                | a free WorldTides key enables next high/low water (blank = off)                                                         |
-| `weather.baseUrl` / `marineBaseUrl` / `tidesBaseUrl` | override hosts for a self-hosted Open-Meteo / WorldTides instance                                                       |
-| `weather.timeoutMs` / `cacheMs`                      | request timeout; reuse window between fetches                                                                           |
-| `replyTargetOriginOnly`                              | reply only to the satellite that asked (else all)                                                                       |
-| `speakErrors`                                        | speak a short error if the LLM is unreachable                                                                           |
+| Field                                         | Notes                                                                                                                   |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `llm.provider`                                | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                                                                  |
+| `llm.baseUrl`                                 | used by `local`/`custom` (a hosted provider overrides it)                                                               |
+| `llm.model`                                   | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`)                                       |
+| `llm.apiKey`                                  | empty for local; required for a hosted provider                                                                         |
+| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                                                                             |
+| `systemPrompt`                                | how the assistant behaves (open-topic by default; edit to make it terser or boat-only — keep it speakable, no markdown) |
+| `context.*`                                   | which boat-data groups to feed the LLM                                                                                  |
+| `weather.enabled`                             | add weather + sea state from the SignalK Weather API (needs a weather-provider plugin)                                  |
+| `weather.forecastHours`                       | how many forecast intervals ahead to summarise (1–48)                                                                   |
+| `weather.marine`                              | also include sea state (waves + swell) when the provider supplies it                                                    |
+| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)                                                                       |
+| `speakErrors`                                 | speak a short error if the LLM is unreachable                                                                           |
 
 ## Notes
 

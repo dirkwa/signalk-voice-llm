@@ -146,6 +146,86 @@ test("electrical: iterates battery banks and unwraps nested values", () => {
   assert.match(out, /battery start 50%, 12\.10 V/);
 });
 
+test("tide: reports current height + state and orders next high/low by time", () => {
+  // low (14:56) is sooner than high (08:55 next day) -> low listed first.
+  const out = buildContext(
+    reader({
+      "environment.tide.state": "rising",
+      "environment.tide.heightNow": 1.08,
+      "environment.tide.timeHigh": "2026-08-03T08:55:03.558Z",
+      "environment.tide.heightHigh": 1.78,
+      "environment.tide.timeLow": "2026-08-02T14:56:15.627Z",
+      "environment.tide.heightLow": 0.59,
+    }),
+    ALL,
+  );
+  assert.match(out, /^Tide: 1\.1 m and rising;/m);
+  const tideLine = out.split("\n").find((l) => l.startsWith("Tide:"))!;
+  const lowIdx = tideLine.indexOf("low water");
+  const highIdx = tideLine.indexOf("high water");
+  assert.ok(
+    lowIdx > 0 && highIdx > 0 && lowIdx < highIdx,
+    "sooner extreme first",
+  );
+  assert.match(out, /next low water 14:56 UTC \(0\.6 m\)/);
+  assert.match(out, /next high water 08:55 UTC \(1\.8 m\)/);
+});
+
+test("tide: omitted entirely when no tide data is present", () => {
+  const out = buildContext(reader({}), ALL);
+  assert.doesNotMatch(out, /Tide:/);
+});
+
+test("tide: is gated by the environment group toggle", () => {
+  const out = buildContext(reader({ "environment.tide.heightNow": 1.0 }), {
+    ...ALL,
+    environment: false,
+  });
+  assert.doesNotMatch(out, /Tide:/);
+});
+
+test("tide: reports a single upcoming extreme when only one is present", () => {
+  const out = buildContext(
+    reader({
+      "environment.tide.timeHigh": "2026-08-02T08:55:00.000Z",
+      "environment.tide.heightHigh": 1.8,
+    }),
+    ALL,
+  );
+  assert.match(out, /^Tide: next high water 08:55 UTC \(1\.8 m\)\.$/m);
+  assert.doesNotMatch(out, /low water/);
+});
+
+test("tide: drops an unparseable timestamp instead of emitting a blank time", () => {
+  // A malformed timeHigh must not reach slice()/toISOString(): the good low
+  // extreme still renders, the bad high is silently dropped, no crash / blank.
+  const out = buildContext(
+    reader({
+      "environment.tide.timeHigh": "not-a-date",
+      "environment.tide.heightHigh": 1.8,
+      "environment.tide.timeLow": "2026-08-02T14:56:00.000Z",
+      "environment.tide.heightLow": 0.6,
+    }),
+    ALL,
+  );
+  assert.match(out, /Tide: next low water 14:56 UTC \(0\.6 m\)\./);
+  assert.doesNotMatch(out, /high water/);
+  assert.doesNotMatch(out, /Invalid|NaN|undefined/);
+});
+
+test("tide: unwraps SK node ({ value }) tide paths", () => {
+  const out = buildContext(
+    reader({
+      "environment.tide.heightNow": { value: 1.5 },
+      "environment.tide.state": { value: "rising" },
+      "environment.tide.timeHigh": { value: "2026-08-02T08:55:00.000Z" },
+      "environment.tide.heightHigh": { value: 1.8 },
+    }),
+    ALL,
+  );
+  assert.match(out, /Tide: 1\.5 m and rising; next high water 08:55 UTC/);
+});
+
 test("electrical: iterates tanks by type and id as percentages", () => {
   const out = buildContext(
     reader({

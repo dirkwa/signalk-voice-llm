@@ -1,6 +1,11 @@
 import { chat, ChatMessage, LlmConfig } from "./llm";
 import { buildContext, ContextGroups, SelfPathReader } from "./context";
-import { fetchWeather, WeatherConfig, WEATHER_DEFAULTS } from "./weather";
+import {
+  fetchWeather,
+  WeatherApiLike,
+  WeatherConfig,
+  WEATHER_DEFAULTS,
+} from "./weather";
 import { PROVIDERS, ProviderId, resolveBaseUrl } from "./providers";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +33,10 @@ interface App {
   setPluginStatus?: (msg: string) => void;
   setPluginError?: (msg: string) => void;
   getSelfPath: (path: string) => unknown;
+  // SignalK Weather API — present when a weather-provider plugin is installed
+  // (e.g. @signalk/open-meteo-provider). Absent/throwing when none is; the
+  // weather block is best-effort either way.
+  weatherApi?: WeatherApiLike;
   subscriptionmanager?: {
     subscribe: (
       sub: unknown,
@@ -59,8 +68,9 @@ interface Config {
   };
   systemPrompt: string;
   context: ContextGroups;
-  // Live weather forecast (Open-Meteo) for the boat's position — the local LLM
-  // has no internet, so this fetches the forecast and feeds it as context.
+  // Live weather + sea state for the boat's position, via the SignalK Weather
+  // API (a weather-provider plugin supplies the data). Tides come from
+  // environment.tide.* in the boat-data snapshot, not from here.
   weather: {
     enabled: boolean;
   } & WeatherConfig;
@@ -229,67 +239,30 @@ module.exports = function (app: App) {
         },
         weather: {
           type: "object",
-          title: "Weather forecast (Open-Meteo, no API key)",
+          title: "Weather & sea state (SignalK Weather API)",
           description:
-            "Fetches a live forecast for the boat's position so the assistant can answer weather questions — the local LLM has no internet on its own.",
+            "Adds a live forecast + sea state for the boat's position so the assistant can answer weather questions. Data comes from a SignalK weather-provider plugin (e.g. @signalk/open-meteo-provider) — install one, or this section is a no-op. Tides come from a tides plugin (e.g. signalk-tides) via environment.tide.*, shown with the boat data.",
           properties: {
             enabled: {
               type: "boolean",
-              title: "Enable weather forecast",
+              title: "Enable weather & sea state",
               default: SCHEMA_DEFAULTS.weather.enabled,
             },
             forecastHours: {
               type: "number",
-              title: "Forecast window (hours)",
-              description: "How far ahead to summarise (1–48).",
+              title: "Forecast window (intervals)",
+              minimum: 1,
+              maximum: 48,
+              description:
+                "How many forecast intervals ahead to summarise (1–48; the provider sets the interval length, typically hourly).",
               default: SCHEMA_DEFAULTS.weather.forecastHours,
-            },
-            timeoutMs: {
-              type: "number",
-              title: "Forecast request timeout (ms)",
-              default: SCHEMA_DEFAULTS.weather.timeoutMs,
-            },
-            cacheMs: {
-              type: "number",
-              title: "Forecast cache (ms)",
-              description:
-                "Reuse the last forecast for this long instead of refetching. 0 disables.",
-              default: SCHEMA_DEFAULTS.weather.cacheMs,
-            },
-            baseUrl: {
-              type: "string",
-              title: "Open-Meteo base URL",
-              description:
-                "The forecast API host. Leave as the default unless you run a self-hosted Open-Meteo instance.",
-              default: SCHEMA_DEFAULTS.weather.baseUrl,
             },
             marine: {
               type: "boolean",
-              title: "Include sea state (swell & waves)",
+              title: "Include sea state (waves & swell)",
               description:
-                "Also fetch the Open-Meteo Marine forecast (wave height/period, swell) for the boat's position. Free, no API key.",
+                "Also summarise wave height/period and swell when the weather provider supplies marine data.",
               default: SCHEMA_DEFAULTS.weather.marine,
-            },
-            marineBaseUrl: {
-              type: "string",
-              title: "Open-Meteo Marine base URL",
-              description:
-                "The marine API host (a different subdomain from the forecast host). Leave as the default unless self-hosting.",
-              default: SCHEMA_DEFAULTS.weather.marineBaseUrl,
-            },
-            tidesApiKey: {
-              type: "string",
-              title: "WorldTides API key (optional — enables tides)",
-              description:
-                "Tides need a key (no free keyless source exists). Leave empty to skip tides; weather and sea state still work. Get a free key at worldtides.info to add next high/low water.",
-              default: SCHEMA_DEFAULTS.weather.tidesApiKey,
-            },
-            tidesBaseUrl: {
-              type: "string",
-              title: "WorldTides base URL",
-              description:
-                "The tides API host. Leave as the default unless you proxy it.",
-              default: SCHEMA_DEFAULTS.weather.tidesBaseUrl,
             },
           },
         },
@@ -375,9 +348,10 @@ module.exports = function (app: App) {
 
         const boat = buildContext(reader, config.context);
 
-        // Fetch a live forecast for the current position (best-effort — never
-        // throws, returns "" when off / unavailable). The local LLM can't
-        // reach the internet, so this is how it answers weather questions.
+        // Add a live forecast + sea state for the current position from the
+        // SignalK Weather API (best-effort — never throws, returns "" when off,
+        // no provider is registered, or the position is unknown). Tides are
+        // already in `boat` via environment.tide.*.
         let weather = "";
         if (config.weather.enabled) {
           // getSelfPath may return a bare value OR a SK node ({ value, ... }).
@@ -403,6 +377,7 @@ module.exports = function (app: App) {
               p.latitude,
               p.longitude,
               config.weather as WeatherConfig,
+              app.weatherApi,
             );
           }
         }

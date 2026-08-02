@@ -36,6 +36,10 @@
     "appIcon": "./app-icon.svg",
     "requires": [
       "signalk-wyoming"
+    ],
+    "recommends": [
+      "@signalk/open-meteo-provider",
+      "signalk-tides"
     ]
   },
   "signalk-plugin-enabled-by-default": false,
