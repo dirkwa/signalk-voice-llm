@@ -9,6 +9,53 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 
+// --- Network isolation guard --------------------------------------------
+//
+// Every fetch in these tests must go to a loopback stub, never the real
+// internet. A test that forgets to point a weather source at the stub (e.g.
+// sets marineBaseUrl to "" so it falls back to the live Open-Meteo host, or
+// omits weather.baseUrl entirely) would otherwise hit the real API — a silent
+// source of CI flakiness that masquerades as a passing test. This wraps the
+// global fetch so any non-loopback host throws immediately, turning that
+// mistake into a loud, obvious failure at the call site.
+//
+// Installed as a module side-effect: only e2e.test.ts imports this harness,
+// and it is the only test file that makes network calls, so the guard covers
+// exactly the file that needs it. The pure formatter/provider tests never
+// call fetch, so they are unaffected.
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : (input as Request).url;
+  let host = "";
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(url);
+    host = parsed.hostname;
+  } catch {
+    // A malformed URL is itself a test bug — let the real fetch surface it.
+  }
+  if (host && !LOOPBACK.has(host)) {
+    // Log only origin + path — the tides URL carries the WorldTides key as a
+    // query param, and printing the full URL would leak it into CI output.
+    const safeUrl = parsed ? `${parsed.origin}${parsed.pathname}` : "<invalid>";
+    throw new Error(
+      `test network isolation: blocked fetch to non-loopback host "${host}" ` +
+        `(${safeUrl}). Point this source at a loopback stub (startFakeOpenMeteo / ` +
+        `startFakeLlm), e.g. via weather.baseUrl / marineBaseUrl / tidesBaseUrl.`,
+    );
+  }
+  return realFetch(input, init);
+}) as typeof fetch;
+
 // --- Fake LLM ------------------------------------------------------------
 
 export interface LlmRequest {
@@ -145,6 +192,25 @@ const DEFAULT_METEO_BODY = {
   },
 };
 
+const DEFAULT_MARINE_BODY = {
+  current: {
+    wave_height: 1.2,
+    wave_direction: 300,
+    wave_period: 5.5,
+    swell_wave_height: 0.8,
+    swell_wave_period: 7.2,
+  },
+};
+
+// Two extremes far in the future so formatTides always considers them upcoming
+// regardless of the test clock (the plugin passes the real Date.now()).
+const DEFAULT_TIDES_BODY = {
+  extremes: [
+    { dt: 4102448400, date: "2100-01-01T06:00", height: 1.4, type: "High" },
+    { dt: 4102470000, date: "2100-01-01T12:00", height: 0.2, type: "Low" },
+  ],
+};
+
 /**
  * A real loopback stub for Open-Meteo, mirroring startFakeLlm: the plugin is
  * pointed at this via weather.baseUrl and reaches it over real TCP with the
@@ -160,7 +226,8 @@ export async function startFakeOpenMeteo(
 
   const server = http.createServer((req, res) => {
     req.socket.unref();
-    requests.push(req.url ?? "");
+    const url = req.url ?? "";
+    requests.push(url);
     if (hang) {
       openResponses.add(res);
       return; // never respond — the client's timeout must fire
@@ -170,8 +237,15 @@ export async function startFakeOpenMeteo(
       res.end();
       return;
     }
+    // Route by path so the same stub can back forecast, marine and tides —
+    // the plugin fetches all three when they're enabled.
+    const payload = url.startsWith("/v1/marine")
+      ? DEFAULT_MARINE_BODY
+      : url.startsWith("/api/v3")
+        ? DEFAULT_TIDES_BODY
+        : body;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(body));
+    res.end(JSON.stringify(payload));
   });
 
   await new Promise<void>((resolve) =>

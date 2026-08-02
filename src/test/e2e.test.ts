@@ -15,6 +15,7 @@ import {
   startFakeOpenMeteo,
   waitFor,
 } from "./harness";
+import { PROVIDERS, resolveBaseUrl } from "../providers";
 
 // require() rather than import: the plugin is CommonJS
 // (module.exports = function (app) {…}), which is the shape Signal K loads.
@@ -32,6 +33,22 @@ const pluginFactory = require(path.join(__dirname, "..", "index.js")) as (
 };
 
 function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
+  // When a test points weather at the loopback stub via weather.baseUrl, also
+  // route the marine AND tides fetches there (the stub is path-aware) unless
+  // the test set its own host — otherwise they'd hit the real Open-Meteo /
+  // WorldTides hosts. A test can still opt out per-source by setting the host
+  // explicitly (e.g. marineBaseUrl: "" to exercise the isolation guard).
+  const w = over.weather as Record<string, unknown> | undefined;
+  const weather =
+    w && typeof w.baseUrl === "string"
+      ? {
+          ...(w.marineBaseUrl === undefined
+            ? { marineBaseUrl: w.baseUrl }
+            : {}),
+          ...(w.tidesBaseUrl === undefined ? { tidesBaseUrl: w.baseUrl } : {}),
+          ...w,
+        }
+      : w;
   return {
     llm: {
       baseUrl,
@@ -42,6 +59,7 @@ function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
       timeoutMs: 5000,
     },
     ...over,
+    ...(weather ? { weather } : {}),
   };
 }
 
@@ -502,18 +520,28 @@ test("feeds a live forecast for the boat's position to the model", async () => {
   mock.sendCommand("what's the wind doing this afternoon", "cockpit");
   await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
 
-  // The forecast fetch used the boat's actual position.
-  assert.equal(meteo.requests.length, 1, "should fetch the forecast once");
-  assert.match(meteo.requests[0]!, /latitude=54\.32/);
-  assert.match(meteo.requests[0]!, /longitude=10\.14/);
+  // Both the forecast and the marine fetch used the boat's actual position.
+  const forecastReq = meteo.requests.find((u) => u.startsWith("/v1/forecast"));
+  const marineReq = meteo.requests.find((u) => u.startsWith("/v1/marine"));
+  assert.ok(forecastReq, "should fetch the forecast");
+  assert.ok(marineReq, "should fetch the marine forecast (marine defaults on)");
+  assert.match(forecastReq, /latitude=54\.32/);
+  assert.match(forecastReq, /longitude=10\.14/);
+  assert.match(marineReq, /latitude=54\.32/);
 
-  // And the formatted forecast reached the model as context.
+  // And the formatted forecast + sea state reached the model as context.
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
   assert.ok(system, "a system message should carry the forecast");
-  assert.match(system.content, /Weather forecast/i);
+  assert.match(system.content, /Weather and sea conditions/i);
   assert.match(system.content, /overcast/, "WMO code 3 -> overcast");
   assert.match(system.content, /wind SW 12 kn/, "current wind, compass + kn");
   assert.match(system.content, /gusting/, "hourly gusts summarised");
+  assert.match(
+    system.content,
+    /waves 1\.2 m from WNW/,
+    "marine waves summarised",
+  );
+  assert.match(system.content, /swell 0\.8 m/, "marine swell summarised");
   // No raw placeholders or untranslated fields leak in.
   assert.doesNotMatch(system.content, /undefined|NaN|weather_code/);
 
@@ -543,7 +571,7 @@ test("skips the forecast when weather is disabled", async () => {
 
   assert.equal(meteo.requests.length, 0, "must not fetch when disabled");
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
-  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.doesNotMatch(system!.content, /Weather and sea conditions/i);
 
   plugin.stop();
   await llm.close();
@@ -569,7 +597,7 @@ test("still answers when the forecast fetch fails", async () => {
   // A failed forecast must not block or crash the reply — just no weather block.
   assert.equal(mock.spoken[0]!.text, "Answering anyway.");
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
-  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.doesNotMatch(system!.content, /Weather and sea conditions/i);
   assert.deepEqual(mock.errorLog, [], "a weather miss is not an error");
 
   plugin.stop();
@@ -599,10 +627,13 @@ test("a hung forecast respects the timeout and still answers", async () => {
   mock.sendCommand("weather?", "cockpit");
   await waitFor(() => mock.spoken.length > 0, "the reply never came");
 
-  assert.equal(meteo.requests.length, 1, "the forecast was attempted");
+  assert.ok(
+    meteo.requests.some((u) => u.startsWith("/v1/forecast")),
+    "the forecast was attempted",
+  );
   assert.equal(mock.spoken[0]!.text, "Answered without weather.");
   const system = llm.requests[0]!.messages.find((m) => m.role === "system");
-  assert.doesNotMatch(system!.content, /Weather forecast/i);
+  assert.doesNotMatch(system!.content, /Weather and sea conditions/i);
   assert.deepEqual(mock.errorLog, [], "a weather timeout is not an error");
 
   plugin.stop();
@@ -647,6 +678,172 @@ test("survives a non-object navigation.position without throwing", async () => {
   assert.equal(mock.spoken[0]!.text, "Still answering.");
   assert.equal(meteo.requests.length, 0, "a bad position must not be fetched");
   assert.deepEqual(mock.errorLog, [], "a bad position is not an error");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("fetches tides only when a WorldTides key is configured", async () => {
+  const llm = await startFakeLlm("Tide's turning.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  // Point tides at the same path-aware stub and supply a key so tides are on.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: {
+        baseUrl: meteo.baseUrl,
+        tidesBaseUrl: meteo.baseUrl,
+        tidesApiKey: "test-key",
+      },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("when's high water", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  const tideReq = meteo.requests.find((u) => u.startsWith("/api/v3"));
+  assert.ok(tideReq, "a key must trigger a tides fetch");
+  assert.match(tideReq, /extremes/);
+  assert.match(tideReq, /key=test-key/);
+
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.match(system!.content, /Tides: next/, "tide extremes reach the model");
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("does not fetch tides without a key", async () => {
+  const llm = await startFakeLlm("Ok.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { baseUrl: meteo.baseUrl, tidesBaseUrl: meteo.baseUrl },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("tides?", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  assert.ok(
+    !meteo.requests.some((u) => u.startsWith("/api/v3")),
+    "no key -> no tides fetch (no forced signup)",
+  );
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Tides:/);
+
+  plugin.stop();
+  await llm.close();
+  await meteo.close();
+});
+
+test("custom provider sends to the configured URL; hosted overrides it", async () => {
+  // The plugin must send its request to the provider preset's host, not the
+  // baseUrl verbatim — so pointing baseUrl at the stub proves the request path
+  // (config -> resolveBaseUrl -> chat) reaches the configured host end-to-end.
+  // The *override* branch (a hosted preset replacing baseUrl) can't be driven
+  // to a stub without a live host, so it is covered by the unit test in
+  // providers.test.ts; here we additionally assert, at this boundary, that a
+  // hosted selection would NOT resolve to the configured local URL.
+  const llm = await startFakeLlm("Via custom.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+
+  plugin.start(
+    configFor(llm.baseUrl, {
+      llm: {
+        provider: "custom",
+        baseUrl: llm.baseUrl,
+        model: "test-model",
+        apiKey: "k",
+        temperature: 0.4,
+        maxTokens: 200,
+        timeoutMs: 5000,
+      },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("hi", "cockpit");
+  await waitFor(() => llm.requests.length > 0, "the LLM was never asked");
+
+  assert.equal(mock.spoken[0]!.text, "Via custom.");
+  assert.equal(
+    llm.requests.length,
+    1,
+    "custom must send to the configured baseUrl (the stub)",
+  );
+  // And a hosted provider must resolve AWAY from that same configured URL.
+  assert.notEqual(
+    resolveBaseUrl("groq", llm.baseUrl),
+    llm.baseUrl,
+    "a hosted preset must override the configured baseUrl",
+  );
+  assert.equal(resolveBaseUrl("groq", llm.baseUrl), PROVIDERS.groq.baseUrl);
+
+  plugin.stop();
+  await llm.close();
+});
+
+test("the network-isolation guard blocks a non-loopback fetch", async () => {
+  // Proves the harness guard is live: a direct fetch to a real host must throw
+  // rather than reach the internet. This is what turns an accidental live call
+  // in a future weather test into a loud failure instead of silent flakiness.
+  await assert.rejects(
+    () => fetch("https://marine-api.open-meteo.com/v1/marine?latitude=0"),
+    /network isolation: blocked fetch to non-loopback host/,
+  );
+  // Loopback still works (the stubs rely on it).
+  const llm = await startFakeLlm("ok");
+  const res = await fetch(`${llm.baseUrl}/models`).catch(() => null);
+  assert.ok(res, "loopback fetch must not be blocked");
+  await llm.close();
+});
+
+test("a leaked marine fetch is blocked yet the reply still comes", async () => {
+  // The exact footgun: marineBaseUrl set to "" bypasses configFor's stub
+  // injection and, marine being on by default, falls back to the live host.
+  // The guard blocks that fetch; because fetchMarine's result is best-effort
+  // (getJson catches, safeFormat backstops), the marine line is simply dropped
+  // and the assistant still answers — the forecast (pointed at the stub) and
+  // the reply are unaffected. No live host is ever contacted.
+  const llm = await startFakeLlm("Answered without sea state.");
+  const meteo = await startFakeOpenMeteo();
+
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: 54.32, longitude: 10.14 },
+  };
+
+  const plugin = pluginFactory(mock.app);
+  // marineBaseUrl: "" defeats the stub injection on purpose.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      weather: { baseUrl: meteo.baseUrl, marineBaseUrl: "" },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("weather?", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "the reply never came");
+
+  assert.equal(mock.spoken[0]!.text, "Answered without sea state.");
+  const system = llm.requests[0]!.messages.find((m) => m.role === "system");
+  assert.doesNotMatch(system!.content, /Sea state/, "leaked marine is dropped");
+  assert.deepEqual(mock.errorLog, [], "a blocked marine fetch is not an error");
 
   plugin.stop();
   await llm.close();
