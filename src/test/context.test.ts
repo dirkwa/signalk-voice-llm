@@ -6,6 +6,11 @@
 // node-vs-bare-value unwrapping), the group toggles, and absent/garbage paths
 // are pinned down here rather than only through one e2e assertion.
 
+// Tide times are rendered in the server's local timezone. Pin it to UTC so the
+// bulk of the assertions read the same HH:MM as the UTC input; a dedicated test
+// below sets a non-UTC zone to prove the local conversion actually happens.
+process.env.TZ = "UTC";
+
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import {
@@ -167,8 +172,8 @@ test("tide: reports current height + state and orders next high/low by time", ()
     lowIdx > 0 && highIdx > 0 && lowIdx < highIdx,
     "sooner extreme first",
   );
-  assert.match(out, /next low water 14:56 UTC \(0\.6 m\)/);
-  assert.match(out, /next high water 08:55 UTC \(1\.8 m\)/);
+  assert.match(out, /next low water 14:56 \(0\.6 m\)/);
+  assert.match(out, /next high water 08:55 \(1\.8 m\)/);
 });
 
 test("tide: omitted entirely when no tide data is present", () => {
@@ -192,12 +197,12 @@ test("tide: reports a single upcoming extreme when only one is present", () => {
     }),
     ALL,
   );
-  assert.match(out, /^Tide: next high water 08:55 UTC \(1\.8 m\)\.$/m);
+  assert.match(out, /^Tide: next high water 08:55 \(1\.8 m\)\.$/m);
   assert.doesNotMatch(out, /low water/);
 });
 
 test("tide: drops an unparseable timestamp instead of emitting a blank time", () => {
-  // A malformed timeHigh must not reach slice()/toISOString(): the good low
+  // A malformed timeHigh must be dropped before formatting: the good low
   // extreme still renders, the bad high is silently dropped, no crash / blank.
   const out = buildContext(
     reader({
@@ -208,7 +213,7 @@ test("tide: drops an unparseable timestamp instead of emitting a blank time", ()
     }),
     ALL,
   );
-  assert.match(out, /Tide: next low water 14:56 UTC \(0\.6 m\)\./);
+  assert.match(out, /Tide: next low water 14:56 \(0\.6 m\)\./);
   assert.doesNotMatch(out, /high water/);
   assert.doesNotMatch(out, /Invalid|NaN|undefined/);
 });
@@ -223,7 +228,32 @@ test("tide: unwraps SK node ({ value }) tide paths", () => {
     }),
     ALL,
   );
-  assert.match(out, /Tide: 1\.5 m and rising; next high water 08:55 UTC/);
+  assert.match(out, /Tide: 1\.5 m and rising; next high water 08:55/);
+});
+
+test("tide: renders times in the boat's local timezone, not UTC", () => {
+  // The whole point of the fix: a UTC tide timestamp must be spoken in local
+  // time. Force a +12 zone (as on the boat) so 08:55Z -> 20:55 local.
+  const savedTz = process.env.TZ;
+  process.env.TZ = "Pacific/Fiji";
+  try {
+    const out = buildContext(
+      reader({
+        "environment.tide.timeHigh": "2026-08-02T08:55:00.000Z",
+        "environment.tide.heightHigh": 1.8,
+      }),
+      ALL,
+    );
+    // 08:55 UTC + 12h = 20:55 local. Must NOT show the UTC time or a "UTC" label.
+    assert.match(
+      out,
+      /next high water 20:55 \(1\.8 m\)/,
+      "converted to +12 local",
+    );
+    assert.doesNotMatch(out, /08:55|UTC/);
+  } finally {
+    process.env.TZ = savedTz;
+  }
 });
 
 test("electrical: iterates tanks by type and id as percentages", () => {

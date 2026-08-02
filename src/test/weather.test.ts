@@ -5,6 +5,11 @@
 // SI->nautical conversions, the marine summary, and the best-effort guarantees
 // (no provider, provider throws, malformed data => "" never throws).
 
+// Forecast times are rendered in the server's local timezone; pin it to UTC so
+// the sample-time assertions are deterministic and read the same HH:MM as the
+// UTC input. hhmmLocal itself is exercised for a non-UTC zone in context.test.ts.
+process.env.TZ = "UTC";
+
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import {
@@ -182,9 +187,9 @@ test("fetchWeather still returns data when the provider beats the timeout", asyn
   assert.match(out, /Now: Partly cloudy/, "a provider under the timeout wins");
 });
 
-test("formatForecast labels later sample times as UTC", () => {
-  // The forecast trend times must carry an explicit UTC marker so the model
-  // can't speak them as boat-local. SAMPLE[1].date is 09:00Z.
+test("formatForecast renders later sample times in local time", () => {
+  // Forecast trend times are shown in the boat's local timezone. Tests pin
+  // TZ=UTC, so SAMPLE[1].date (09:00Z) renders as 09:00.
   const out = formatForecast(SAMPLE, 12);
-  assert.match(out, /Later: 09:00 UTC /, "sample time labelled UTC");
+  assert.match(out, /Later: 09:00 /, "sample time (local; TZ=UTC in tests)");
 });

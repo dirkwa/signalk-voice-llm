@@ -3,6 +3,8 @@
 // depth?", "am I dragging?"). Kept short and unit-friendly — the model gets
 // clean numbers, not raw SI radians.
 
+import { hhmmLocal } from "./weather";
+
 export interface SelfPathReader {
   // Returns the current value at a self path, or undefined if absent.
   get(path: string): unknown;
@@ -152,9 +154,10 @@ export function buildContext(
       })
       .sort((a, b) => a.ms - b.ms);
     for (const e of extremes) {
-      const hhmm = new Date(e.ms).toISOString().slice(11, 16); // UTC
+      // Local boat time (server timezone), not UTC — the skipper wants the
+      // ship's clock.
       tide.push(
-        `next ${e.label} water ${hhmm} UTC${e.h !== undefined ? ` (${fmt(e.h)} m)` : ""}`,
+        `next ${e.label} water ${hhmmLocal(e.ms)}${e.h !== undefined ? ` (${fmt(e.h)} m)` : ""}`,
       );
     }
     if (tide.length) lines.push("Tide: " + tide.join("; ") + ".");
