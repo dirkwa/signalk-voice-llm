@@ -1,6 +1,6 @@
 {
   "name": "signalk-voice-llm",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Answer boat voice commands with a local or remote LLM: subscribes to voice.command (from signalk-wyoming), asks an OpenAI-compatible LLM (LM Studio, Ollama, etc.), and speaks the reply back via say().",
   "main": "dist/index.js",
   "files": [
