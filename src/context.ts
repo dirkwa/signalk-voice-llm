@@ -77,16 +77,36 @@ const MONTHS = [
 function currentTimeLine(reader: SelfPathReader): string {
   const iso = str(reader.get("environment.time.localTime"));
   if (!iso) return "";
-  // Match "YYYY-MM-DDTHH:MM" with an optional trailing offset; keep the local
-  // wall-clock components verbatim.
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso);
+  // Require a FULL ISO local-datetime: date, time, optional seconds/fraction,
+  // and an optional offset (Z or ±HH:MM). Anchoring both ends rejects trailing
+  // garbage; the field ranges + the round-trip check below reject impossible
+  // calendar values (month 13, day 45, 25:61, Feb 30).
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/.exec(
+      iso,
+    );
   if (!m) return "";
   const [, y, mon, day, hh, mm] = m;
-  const monIdx = Number(mon) - 1;
-  const monName = MONTHS[monIdx] ?? mon;
-  // Weekday from the date parts (UTC math on the local calendar date is fine —
-  // we only need the day name, and the date fields are already local).
-  const wd = WEEKDAYS[new Date(`${y}-${mon}-${day}T00:00:00Z`).getUTCDay()];
+  const yr = Number(y);
+  const monN = Number(mon);
+  const dayN = Number(day);
+  const hhN = Number(hh);
+  const mmN = Number(mm);
+  if (monN < 1 || monN > 12 || dayN < 1 || dayN > 31) return "";
+  if (hhN > 23 || mmN > 59) return "";
+  // Reject impossible dates (e.g. Feb 30) via a UTC round-trip on the wall-clock
+  // date: if the parts survive normalisation unchanged, the date is real. UTC
+  // here is only used to derive the weekday of that local calendar date.
+  const d = new Date(Date.UTC(yr, monN - 1, dayN));
+  if (
+    d.getUTCFullYear() !== yr ||
+    d.getUTCMonth() !== monN - 1 ||
+    d.getUTCDate() !== dayN
+  ) {
+    return "";
+  }
+  const monName = MONTHS[monN - 1] ?? mon;
+  const wd = WEEKDAYS[d.getUTCDay()];
   const date = `${wd ? wd + " " : ""}${day} ${monName}`;
   return `Current time: ${date} ${hh}:${mm} (local boat time).`;
 }

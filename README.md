@@ -47,12 +47,12 @@ you speak  →  voice.command (SignalK)
 - **STT-robust** — the system prompt tells the model the text came from
   speech-to-text and may be misheard, so it interprets nautically
   (e.g. "debt" → "depth").
-- **Knows the local time** — SignalK publishes only UTC, so the assistant reads
-  the boat's local time from `environment.time.localTime` (published by a
-  timezone plugin, e.g.
+- **Knows the local time** — SignalK publishes only UTC, so when a timezone
+  plugin (e.g.
   [@yachteye/signalk-timezone-plugin](https://www.npmjs.com/package/@yachteye/signalk-timezone-plugin))
-  and includes it in the context, so it can reason about "now", "tonight", and
-  when the next tide is. Without such a plugin, the time line is simply omitted.
+  supplies the boat's local time, the assistant includes it in the context and
+  can reason about "now", "tonight", and when the next tide is. Without such a
+  plugin, the time line is simply omitted.
 
 ## Requirements
 

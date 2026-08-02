@@ -78,6 +78,26 @@ test("current time: omitted when no local-time path is published", () => {
   assert.doesNotMatch(out, /Current time:/);
 });
 
+test("current time: omits invalid-calendar and invalid-suffix values", () => {
+  // Impossible calendar/time fields and trailing garbage must not render a
+  // bogus time — the line is dropped entirely rather than spoken as nonsense.
+  const bogus = [
+    "2026-13-45T99:99+12:00", // month 13, day 45, 99:99
+    "2026-00-00T25:61Z", // month/day 00, 25:61
+    "2026-02-30T12:00Z", // Feb 30 doesn't exist
+    "2026-08-03T24:00Z", // hour 24
+    "2026-08-03T09:41garbage", // trailing suffix garbage
+    "2026-08-03 09:41", // space instead of T
+  ];
+  for (const bad of bogus) {
+    const out = buildContext(
+      reader({ "environment.time.localTime": bad }),
+      ALL,
+    );
+    assert.doesNotMatch(out, /Current time:/, `must omit ${bad}`);
+  }
+});
+
 test("current time: tolerates a malformed localTime string", () => {
   for (const bad of ["not-a-date", "2026-08", "", 42, null, { value: 99 }]) {
     assert.doesNotThrow(() =>
