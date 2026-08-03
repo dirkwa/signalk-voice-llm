@@ -192,6 +192,9 @@ test("initialize captures the session id and sends the right headers", async () 
   assert.ok(init, "sent an initialize request");
   assert.match(init.accept ?? "", /application\/json/);
   assert.match(init.accept ?? "", /text\/event-stream/);
+  // The Host header is derived from the URL so fsk-mcp's loopback DNS-rebinding
+  // guard (which allow-lists 127.0.0.1:<port>) accepts us.
+  assert.equal(init.host, new URL(srv.url).host, "sends the URL's Host header");
   assert.equal(init.sessionId, undefined, "no session id on initialize");
   // The next request carries the returned session id.
   await client.listTools();
@@ -273,6 +276,15 @@ test("an expired session triggers a re-initialize and retry", async () => {
   const res = await client.callTool("fsk_set_view", {});
   assert.equal(res.text, "centered", "recovered after re-init");
   assert.equal(srv.sessions.length, 2, "a second session was created");
+  // The recovery contract: the RETRIED tools/call must carry the NEW session id,
+  // not the stale one (the harness doesn't validate it, so pin it here).
+  const toolCalls = srv.requests.filter((r) => r.body?.method === "tools/call");
+  const retried = toolCalls[toolCalls.length - 1]!;
+  assert.equal(
+    retried.sessionId,
+    srv.sessions[1],
+    "the retry uses the re-initialized session id",
+  );
   await srv.close();
 });
 

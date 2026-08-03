@@ -143,13 +143,22 @@ export class McpClient {
     if (!this.sessionId) return;
     const sid = this.sessionId;
     this.sessionId = null;
+    // close() runs on the plugin teardown path, so it must not hang if the
+    // server accepts the connection but never answers — apply the same timeout
+    // as every other request.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       await fetch(this.url, {
         method: "DELETE",
         headers: this.baseHeaders(sid),
+        signal: controller.signal,
       });
     } catch {
-      // The server drops idle sessions on its own; a failed DELETE is harmless.
+      // The server drops idle sessions on its own; a failed/aborted DELETE is
+      // harmless.
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -186,15 +195,19 @@ export class McpClient {
         "MCP server did not return an Mcp-Session-Id on initialize",
       );
     }
-    this.sessionId = sid;
     const parsed = parseJsonRpc(body);
     if (parsed?.error) {
       throw new Error(
         `MCP initialize failed: ${rpcErrorMessage(parsed.error)}`,
       );
     }
-    // Per spec, acknowledge readiness. Fire-and-forget: a server that ignores it
-    // still works, and we don't want a flaky notification to fail the session.
+    // Only adopt the session once the server actually accepted the initialize:
+    // storing it before the error check would leave a session id for a session
+    // the server refused, and a later request() would skip re-init and post on it.
+    this.sessionId = sid;
+    // Per spec, acknowledge readiness. A server that ignores the notification
+    // still works, so a failed send must not fail the session — the .catch
+    // swallows it (the post is already bounded by this.timeoutMs).
     await this.post(
       {
         jsonrpc: "2.0",
@@ -219,9 +232,12 @@ export class McpClient {
     };
 
     let { response, body } = await send();
-    // A 4xx here usually means the session expired or the server restarted.
-    // Re-initialize once and retry so a long-idle plugin recovers silently.
-    if (response.status >= 400 && response.status < 500) {
+    // The Streamable-HTTP transport reports an expired/unknown session as 404
+    // and a missing session id as 400; re-initialize once and retry so a
+    // long-idle plugin recovers silently. Do NOT retry other 4xx — 401/403
+    // (bad token) would just fail the re-init too, and 429 (rate limit) would
+    // make the pressure worse — let those surface after one round trip.
+    if (response.status === 404 || response.status === 400) {
       this.sessionId = null;
       await this.initialize();
       ({ response, body } = await send());
