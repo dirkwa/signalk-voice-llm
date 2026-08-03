@@ -400,6 +400,7 @@ test("chatWithTools drops malformed tool_calls, keeps the well-formed ones", asy
               type: "function",
               function: { name: "a", arguments: '{"x":1}' },
             },
+            null, // a null entry must not throw the sanitiser
             { type: "function", function: { name: "no_id" } }, // missing id
             { id: "no_fn", type: "function" }, // missing function
             { id: "n", type: "function", function: { name: 42 } }, // non-string name

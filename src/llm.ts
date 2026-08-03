@@ -168,6 +168,9 @@ export async function chatWithTools(
 function sanitizeToolCalls(raw: unknown): ToolCall[] {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((c) => {
+    // A null/non-object entry can't be a tool call — and reading `.function` off
+    // null would throw, defeating the point of a hardening pass.
+    if (c === null || typeof c !== "object") return [];
     const call = c as {
       id?: unknown;
       function?: { name?: unknown; arguments?: unknown };
