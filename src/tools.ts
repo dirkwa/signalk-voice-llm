@@ -62,11 +62,20 @@ export class Toolset {
   // Namespaced function name -> how to actually call it.
   private readonly dispatch = new Map<string, Dispatch>();
 
+  // Connection-retry tuning. Defaults cover the boot race (fsk-mcp binds a
+  // couple of seconds after we start); tests override them to run fast.
+  private readonly maxAttempts: number;
+  private readonly backoffMs: number;
+
   constructor(
     private readonly servers: McpServerConfig[],
     private readonly callTimeoutMs: number,
     private readonly log: (msg: string) => void = () => {},
-  ) {}
+    retry: { maxAttempts?: number; backoffMs?: number } = {},
+  ) {
+    this.maxAttempts = retry.maxAttempts ?? 5;
+    this.backoffMs = retry.backoffMs ?? 2000;
+  }
 
   /** True once at least one tool was discovered — the loop is only worth
    * running when there is something to call. */
@@ -87,6 +96,21 @@ export class Toolset {
   async connect(): Promise<void> {
     for (const server of this.servers) {
       if (server.enabled === false) continue;
+      await this.connectServer(server);
+    }
+  }
+
+  // Connect one server, retrying a failed connection a few times. On a fresh
+  // boot the MCP server (e.g. fsk-mcp) often isn't listening yet when we start —
+  // both plugins come up in parallel and its async bring-up loses the race — so
+  // a single attempt would give a tools-less session for the whole run. A short
+  // bounded backoff closes that window without blocking start() meaningfully
+  // (this runs off the start() path). A server that is genuinely absent just
+  // exhausts the retries and is skipped, exactly as before.
+  private async connectServer(server: McpServerConfig): Promise<void> {
+    const MAX_ATTEMPTS = this.maxAttempts;
+    const BACKOFF_MS = this.backoffMs;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const client = new McpClient({
         url: server.url,
         token: server.token,
@@ -98,11 +122,18 @@ export class Toolset {
         this.register(server.name, client, tools);
         this.clients.push(client);
         this.log(`mcp "${server.name}": ${tools.length} tool(s)`);
+        return;
       } catch (err) {
-        this.log(
-          `mcp "${server.name}" unavailable: ${err instanceof Error ? err.message : String(err)}`,
-        );
         await client.close();
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < MAX_ATTEMPTS) {
+          this.log(
+            `mcp "${server.name}" not ready (attempt ${attempt}/${MAX_ATTEMPTS}: ${msg}); retrying`,
+          );
+          await new Promise((r) => setTimeout(r, BACKOFF_MS));
+        } else {
+          this.log(`mcp "${server.name}" unavailable: ${msg}`);
+        }
       }
     }
   }

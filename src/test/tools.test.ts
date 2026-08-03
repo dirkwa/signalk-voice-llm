@@ -83,12 +83,14 @@ interface FakeMcp {
   url: string;
   calls: { name: string; arguments: unknown }[];
   toolError: boolean;
+  /** Reject this many initialize attempts with a 503 before succeeding. */
+  failInitCount: number;
   close(): Promise<void>;
 }
 
 async function startMcp(): Promise<FakeMcp> {
   const calls: FakeMcp["calls"] = [];
-  const state = { toolError: false };
+  const state = { toolError: false, failInitCount: 0 };
   const server = http.createServer((req, res) => {
     req.socket.unref();
     let buf = "";
@@ -99,6 +101,10 @@ async function startMcp(): Promise<FakeMcp> {
       if (body.method && body.id === undefined)
         return void res.writeHead(202).end(); // notification
       if (body.method === "initialize") {
+        if (state.failInitCount > 0) {
+          state.failInitCount--;
+          return void res.writeHead(503).end("not ready");
+        }
         res.writeHead(200, {
           "Content-Type": "application/json",
           "Mcp-Session-Id": "s1",
@@ -159,6 +165,12 @@ async function startMcp(): Promise<FakeMcp> {
     },
     set toolError(v: boolean) {
       state.toolError = v;
+    },
+    get failInitCount() {
+      return state.failInitCount;
+    },
+    set failInitCount(v: number) {
+      state.failInitCount = v;
     },
     async close() {
       await new Promise<void>((r) => server.close(() => r()));
@@ -375,8 +387,26 @@ test("a server that won't connect is skipped, leaving no tools", async () => {
   const toolset = new Toolset(
     [{ name: "dead", url: "http://127.0.0.1:1/mcp" }],
     300,
+    () => {},
+    { maxAttempts: 2, backoffMs: 10 }, // fast: don't wait the production backoff
   );
   await toolset.connect();
   assert.equal(toolset.hasTools, false);
   await toolset.close();
+});
+
+test("retries a server that isn't ready yet, then connects", async () => {
+  // Model the boot race: the MCP server rejects the first initialize attempts
+  // (as if it hasn't finished binding), then comes up. The toolset must retry
+  // and end up with tools rather than giving up on the first failure.
+  const mcp = await startMcp();
+  mcp.failInitCount = 2; // fail the first two initialize attempts
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 2000, () => {}, {
+    maxAttempts: 4,
+    backoffMs: 50,
+  });
+  await toolset.connect();
+  assert.equal(toolset.hasTools, true, "retry recovered after early failures");
+  await toolset.close();
+  await mcp.close();
 });
