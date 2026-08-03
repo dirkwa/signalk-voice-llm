@@ -10,7 +10,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { chat, type LlmConfig } from "../llm";
+import { chat, chatWithTools, type LlmConfig, type ToolSpec } from "../llm";
 
 // A loopback server that captures the request and lets each test dictate the
 // response (status, body, hang, or valid completion). Sockets are unref'd so a
@@ -257,6 +257,129 @@ test("tolerates a trailing slash on the base URL", async () => {
     srv.requests[0]!.path,
     "/v1/chat/completions",
     "collapses trailing slashes, no //chat/completions",
+  );
+  await srv.close();
+});
+
+// --- chatWithTools() ------------------------------------------------------
+//
+// Same transport as chat() (shared postCompletion), but it sends `tools` +
+// `tool_choice` and returns the assistant turn WHOLE — content, tool_calls, and
+// finish_reason — because a tool-call turn has no prose and must not be treated
+// as the "empty response" error chat() raises.
+
+const TOOLS: ToolSpec[] = [
+  {
+    type: "function",
+    function: {
+      name: "fsk__set_view",
+      description: "center the map",
+      parameters: {
+        type: "object",
+        properties: { longitude: { type: "number" } },
+      },
+    },
+  },
+];
+
+test("chatWithTools sends tools and tool_choice in the body", async () => {
+  const srv = await startServer();
+  srv.setJson({ choices: [{ message: { content: "ok" } }] });
+  await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "x" }],
+    TOOLS,
+  );
+  const body = srv.requests[0]!.body as Record<string, unknown>;
+  assert.deepEqual(body.tools, TOOLS, "the tool list is sent verbatim");
+  assert.equal(body.tool_choice, "auto", "defaults to auto");
+  assert.equal(body.stream, false);
+  await srv.close();
+});
+
+test("chatWithTools honours an explicit tool_choice of none", async () => {
+  const srv = await startServer();
+  srv.setJson({ choices: [{ message: { content: "done" } }] });
+  await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "x" }],
+    TOOLS,
+    "none",
+  );
+  const body = srv.requests[0]!.body as Record<string, unknown>;
+  assert.equal(body.tool_choice, "none");
+  await srv.close();
+});
+
+test("chatWithTools returns tool_calls with an empty content, not an error", async () => {
+  const srv = await startServer();
+  // A pure tool-call turn: content is null, the model wants to run a tool.
+  srv.setJson({
+    choices: [
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "fsk__set_view",
+                arguments: '{"longitude":174.7}',
+              },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  });
+  const turn = await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "center the map" }],
+    TOOLS,
+  );
+  assert.equal(turn.content, "", "no prose on a tool turn — not an error");
+  assert.equal(turn.finishReason, "tool_calls");
+  assert.equal(turn.toolCalls.length, 1);
+  assert.equal(turn.toolCalls[0]!.id, "call_1");
+  assert.equal(turn.toolCalls[0]!.function.name, "fsk__set_view");
+  assert.equal(turn.toolCalls[0]!.function.arguments, '{"longitude":174.7}');
+  await srv.close();
+});
+
+test("chatWithTools returns the final prose turn with no tool_calls", async () => {
+  const srv = await startServer();
+  srv.setJson({
+    choices: [
+      {
+        message: { content: "  Centred on the marina.  " },
+        finish_reason: "stop",
+      },
+    ],
+  });
+  const turn = await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "x" }],
+    TOOLS,
+  );
+  assert.equal(turn.content, "Centred on the marina.", "prose is trimmed");
+  assert.deepEqual(turn.toolCalls, []);
+  assert.equal(turn.finishReason, "stop");
+  await srv.close();
+});
+
+test("chatWithTools maps a timeout the same way chat does", async () => {
+  const srv = await startServer();
+  srv.setHang(true);
+  await assert.rejects(
+    () =>
+      chatWithTools(
+        cfg(srv.baseUrl, { timeoutMs: 150 }),
+        [{ role: "user", content: "x" }],
+        TOOLS,
+      ),
+    /timed out after 150 ms/,
   );
   await srv.close();
 });
