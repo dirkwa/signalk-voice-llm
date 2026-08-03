@@ -88,7 +88,14 @@ interface FakeMcp {
   close(): Promise<void>;
 }
 
-async function startMcp(): Promise<FakeMcp> {
+// `toolNames` overrides the advertised tool list (default: a single set_view)
+// so a test can exercise name truncation / collision handling.
+async function startMcp(toolNames?: string[]): Promise<FakeMcp> {
+  const tools = (toolNames ?? ["set_view"]).map((name) => ({
+    name,
+    description: "test tool",
+    inputSchema: { type: "object", properties: {} },
+  }));
   const calls: FakeMcp["calls"] = [];
   const state = { toolError: false, failInitCount: 0 };
   const server = http.createServer((req, res) => {
@@ -96,8 +103,20 @@ async function startMcp(): Promise<FakeMcp> {
     let buf = "";
     req.on("data", (c) => (buf += c));
     req.on("end", () => {
-      const body = buf ? JSON.parse(buf) : {};
+      // DELETE (session teardown) carries no body — handle it before parsing.
       if (req.method === "DELETE") return void res.writeHead(200).end();
+      let body: {
+        method?: string;
+        id?: unknown;
+        params?: { name?: string; arguments?: unknown };
+      };
+      try {
+        body = buf ? JSON.parse(buf) : {};
+      } catch {
+        // A parse throw inside req.on("end") would be an uncaught exception that
+        // aborts the whole test run, not a single assertion failure.
+        return void res.writeHead(400).end();
+      }
       if (body.method && body.id === undefined)
         return void res.writeHead(202).end(); // notification
       if (body.method === "initialize") {
@@ -116,27 +135,12 @@ async function startMcp(): Promise<FakeMcp> {
       if (body.method === "tools/list") {
         res.writeHead(200, { "Content-Type": "application/json" });
         return void res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: {
-              tools: [
-                {
-                  name: "set_view",
-                  description: "center the map",
-                  inputSchema: {
-                    type: "object",
-                    properties: { longitude: { type: "number" } },
-                  },
-                },
-              ],
-            },
-          }),
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools } }),
         );
       }
       if (body.method === "tools/call") {
         calls.push({
-          name: body.params?.name,
+          name: body.params?.name ?? "",
           arguments: body.params?.arguments,
         });
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -211,7 +215,7 @@ test("discovers, namespaces, and offers MCP tools to the model", async () => {
   );
   assert.deepEqual(toolset.tools[0]!.function.parameters, {
     type: "object",
-    properties: { longitude: { type: "number" } },
+    properties: {},
   });
   await toolset.close();
   await mcp.close();
@@ -354,7 +358,7 @@ test("hitting the iteration cap forces a tool-free summary turn", async () => {
   await mcp.close();
 });
 
-test("drops the reply if the plugin stops mid-loop", async () => {
+test("drops the reply if the plugin stops before the first LLM turn", async () => {
   const mcp = await startMcp();
   const llm = await startLlm([
     { toolCalls: [{ id: "c1", name: "fsk__set_view", arguments: "{}" }] },
@@ -362,13 +366,14 @@ test("drops the reply if the plugin stops mid-loop", async () => {
   ]);
   const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
   await toolset.connect();
+  // stillRunning yields true once (the loop-top check consumes it) then false
+  // at the post-LLM check, so the loop bails before any tool round.
   let alive = true;
   const res = await runConversation(
     cfg(llm.baseUrl),
     [{ role: "user", content: "center the map" }],
     toolset,
     loopOpts({
-      // Stop after the first tool round: flips false before the 2nd LLM call.
       stillRunning: () => {
         const wasAlive = alive;
         alive = false;
@@ -377,6 +382,35 @@ test("drops the reply if the plugin stops mid-loop", async () => {
     }),
   );
   assert.equal(res.text, "", "a stopped plugin speaks nothing");
+  assert.equal(res.rounds, 0, "bailed before running a tool round");
+  assert.equal(mcp.calls.length, 0, "no tool call reached the server");
+  await toolset.close();
+  await llm.close();
+  await mcp.close();
+});
+
+test("drops the reply if the plugin stops after a tool round runs", async () => {
+  const mcp = await startMcp();
+  const llm = await startLlm([
+    { toolCalls: [{ id: "c1", name: "fsk__set_view", arguments: "{}" }] },
+    { content: "should never be spoken" },
+  ]);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
+  await toolset.connect();
+  // Alive for the loop-top and post-LLM checks of the FIRST iteration (so one
+  // tool round runs), then dead at the second iteration's loop-top check.
+  let calls = 0;
+  const res = await runConversation(
+    cfg(llm.baseUrl),
+    [{ role: "user", content: "center the map" }],
+    toolset,
+    loopOpts({
+      stillRunning: () => ++calls <= 2,
+    }),
+  );
+  assert.equal(res.text, "", "a stopped plugin speaks nothing");
+  assert.equal(res.rounds, 1, "one tool round ran before the stop");
+  assert.equal(mcp.calls.length, 1, "the tool ran before we bailed");
   await toolset.close();
   await llm.close();
   await mcp.close();
@@ -401,12 +435,107 @@ test("retries a server that isn't ready yet, then connects", async () => {
   // and end up with tools rather than giving up on the first failure.
   const mcp = await startMcp();
   mcp.failInitCount = 2; // fail the first two initialize attempts
-  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 2000, () => {}, {
-    maxAttempts: 4,
-    backoffMs: 50,
-  });
+  const logs: string[] = [];
+  const toolset = new Toolset(
+    [{ name: "fsk", url: mcp.url }],
+    2000,
+    (m) => logs.push(m),
+    { maxAttempts: 4, backoffMs: 50 },
+  );
   await toolset.connect();
   assert.equal(toolset.hasTools, true, "retry recovered after early failures");
+  // Exactly two "not ready … retrying" lines: an unbounded retry, or the
+  // production 2000 ms backoff instead of the override, would change this.
+  const retries = logs.filter((l) => /not ready .*retrying/.test(l));
+  assert.equal(retries.length, 2, "retried exactly twice before connecting");
+  await toolset.close();
+  await mcp.close();
+});
+
+test("the wall-clock budget forces a tool-free summary turn", async () => {
+  const mcp = await startMcp();
+  // The model would keep calling tools forever; the budget (not the cap) must
+  // break the loop. A fake clock jumps past the deadline after the first round.
+  // Round 1 calls a tool; the budget then trips, so the NEXT (forced,
+  // tool_choice:none) turn is the summary.
+  const llm = await startLlm([
+    { toolCalls: [{ id: "a", name: "fsk__set_view", arguments: "{}" }] },
+    { content: "Summarised what I had when time ran out." },
+  ]);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
+  await toolset.connect();
+  // Controlled clock: 0 for the deadline calc and the first round's start-gate,
+  // then jump past the 1000 ms deadline so the post-round re-check breaks the
+  // loop into the forced summary turn (rather than the iteration cap).
+  let call = 0;
+  const res = await runConversation(
+    cfg(llm.baseUrl),
+    [{ role: "user", content: "keep going" }],
+    toolset,
+    loopOpts({
+      maxIterations: 10, // high, so only the budget can stop it
+      conversationBudgetMs: 1000,
+      now: () => (call++ < 2 ? 0 : 5000),
+    }),
+  );
+  assert.equal(res.text, "Summarised what I had when time ran out.");
+  // The last request must have forced tool_choice:"none".
+  const forced = llm.requests[llm.requests.length - 1] as {
+    tool_choice: string;
+  };
+  assert.equal(forced.tool_choice, "none");
+  await toolset.close();
+  await llm.close();
+  await mcp.close();
+});
+
+test("does not mutate the caller's messages array", async () => {
+  const mcp = await startMcp();
+  const llm = await startLlm([
+    { toolCalls: [{ id: "c1", name: "fsk__set_view", arguments: "{}" }] },
+    { content: "done" },
+  ]);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
+  await toolset.connect();
+  const messages = [{ role: "user" as const, content: "center the map" }];
+  await runConversation(cfg(llm.baseUrl), messages, toolset, loopOpts());
+  assert.equal(messages.length, 1, "the caller's array is untouched");
+  await toolset.close();
+  await llm.close();
+  await mcp.close();
+});
+
+test("truncates long tool names and disambiguates collisions within 64 chars", async () => {
+  // Two names that collide after the 64-char truncation, plus an over-long one.
+  const longA = "a".repeat(80);
+  const longB = longA.slice(0, 79) + "b"; // shares the first 79 chars
+  const mcp = await startMcp([longA, longB, "short"]);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
+  await toolset.connect();
+  const names = toolset.tools.map((t) => t.function.name);
+  assert.equal(names.length, 3);
+  assert.equal(new Set(names).size, 3, "all names are distinct");
+  for (const n of names) {
+    assert.ok(n.length <= 64, `"${n}" must be <= 64 chars`);
+  }
+  await toolset.close();
+  await mcp.close();
+});
+
+test("caps the tool surface per server and logs the drop", async () => {
+  // More tools than MAX_TOOLS_PER_SERVER (32): the excess must be dropped.
+  const many = Array.from({ length: 40 }, (_, i) => `tool_${i}`);
+  const logs: string[] = [];
+  const mcp = await startMcp(many);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000, (m) =>
+    logs.push(m),
+  );
+  await toolset.connect();
+  assert.equal(toolset.tools.length, 32, "surface is capped at 32");
+  assert.ok(
+    logs.some((l) => /capping at 32/.test(l)),
+    "logs what was dropped",
+  );
   await toolset.close();
   await mcp.close();
 });

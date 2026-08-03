@@ -55,12 +55,22 @@ const GIVE_UP = "Sorry, I couldn't finish that.";
  * run. Construct with the enabled server configs, call connect() once, then
  * reuse across voice commands. close() on plugin stop().
  */
+// Cap the number of tools accepted from any one server. The full spec array —
+// each tool's name, description, and inputSchema — is sent on EVERY LLM turn, so
+// an unbounded surface grows the request per voice command and eats the token
+// budget the boat snapshot and the reply need. A server with more tools than
+// this has the excess dropped (and logged); 32 is far above fsk-mcp's 16.
+const MAX_TOOLS_PER_SERVER = 32;
+
 export class Toolset {
   private readonly clients: McpClient[] = [];
   // OpenAI tool specs offered to the model (namespaced names).
   private specs: ToolSpec[] = [];
   // Namespaced function name -> how to actually call it.
   private readonly dispatch = new Map<string, Dispatch>();
+  // Set by close(): a retry still in flight must not publish tools into a
+  // Toolset the plugin already tore down.
+  private closed = false;
 
   // Connection-retry tuning. Defaults cover the boot race (fsk-mcp binds a
   // couple of seconds after we start); tests override them to run fast.
@@ -95,6 +105,7 @@ export class Toolset {
    */
   async connect(): Promise<void> {
     for (const server of this.servers) {
+      if (this.closed) return;
       if (server.enabled === false) continue;
       await this.connectServer(server);
     }
@@ -111,6 +122,7 @@ export class Toolset {
     const MAX_ATTEMPTS = this.maxAttempts;
     const BACKOFF_MS = this.backoffMs;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (this.closed) return;
       const client = new McpClient({
         url: server.url,
         token: server.token,
@@ -119,12 +131,21 @@ export class Toolset {
       try {
         await client.connect();
         const tools = await client.listTools();
+        // A stop()/reconfigure may have closed us while this attempt was in
+        // flight. Don't register into (or leak a live client into) a torn-down
+        // Toolset — tear this connection down instead.
+        if (this.closed) {
+          await client.close().catch(() => undefined);
+          return;
+        }
         this.register(server.name, client, tools);
         this.clients.push(client);
         this.log(`mcp "${server.name}": ${tools.length} tool(s)`);
         return;
       } catch (err) {
-        await client.close();
+        // close() is documented never to throw, but treat it as fallible so a
+        // teardown failure can't abort the retry loop or escape connect().
+        await client.close().catch(() => undefined);
         const msg = err instanceof Error ? err.message : String(err);
         if (attempt < MAX_ATTEMPTS) {
           this.log(
@@ -143,15 +164,25 @@ export class Toolset {
     client: McpClient,
     tools: McpTool[],
   ): void {
+    let accepted = 0;
     for (const tool of tools) {
+      if (accepted >= MAX_TOOLS_PER_SERVER) {
+        this.log(
+          `mcp "${serverName}": capping at ${MAX_TOOLS_PER_SERVER} tools; dropping "${tool.name}" and any after it`,
+        );
+        break;
+      }
       // Namespace so two servers can expose the same tool name; sanitise for
       // OpenAI's function-name charset, and truncate to the 64-char cap.
-      let fnName = sanitize(`${serverName}__${tool.name}`).slice(0, 64);
+      const base = sanitize(`${serverName}__${tool.name}`).slice(0, 64);
       // On a (rare) post-truncation collision, disambiguate deterministically.
+      // Always derive from `base` (not the previously-suffixed name) so the
+      // suffix doesn't stack, and stays within 64 chars.
+      let fnName = base;
       let n = 1;
       while (this.dispatch.has(fnName)) {
         const suffix = `_${n++}`;
-        fnName = fnName.slice(0, 64 - suffix.length) + suffix;
+        fnName = base.slice(0, 64 - suffix.length) + suffix;
       }
       this.dispatch.set(fnName, { client, toolName: tool.name });
       this.specs.push({
@@ -162,6 +193,7 @@ export class Toolset {
           parameters: tool.inputSchema,
         },
       });
+      accepted++;
     }
   }
 
@@ -191,10 +223,13 @@ export class Toolset {
 
   /** Best-effort teardown of every connection. Never throws. */
   async close(): Promise<void> {
-    await Promise.all(this.clients.map((c) => c.close()));
-    this.clients.length = 0;
+    this.closed = true;
+    // Snapshot then reset state first, so a rejecting close() can't skip the
+    // reset (this runs on the plugin stop() path, which must never throw).
+    const clients = this.clients.splice(0);
     this.specs = [];
     this.dispatch.clear();
+    await Promise.allSettled(clients.map((c) => c.close()));
   }
 }
 
@@ -238,13 +273,17 @@ export async function runConversation(
   const log = opts.log ?? (() => {});
   const deadline = opts.now() + opts.conversationBudgetMs;
   const tools = toolset.tools;
+  // Work on our own copy: we append the assistant/tool turns as the loop runs,
+  // and the signature must not mutate the caller's array (a caller reusing it
+  // across voice commands would otherwise accumulate stale tool history).
+  const convo: ChatMessage[] = [...messages];
   let rounds = 0;
 
   for (let iter = 0; iter < opts.maxIterations; iter++) {
     if (!opts.stillRunning()) return { text: "", rounds };
     if (opts.now() >= deadline) break;
 
-    const turn = await chatWithTools(cfg, messages, tools, "auto");
+    const turn = await chatWithTools(cfg, convo, tools, "auto");
     if (!opts.stillRunning()) return { text: "", rounds };
 
     if (turn.toolCalls.length === 0) {
@@ -255,7 +294,7 @@ export async function runConversation(
     rounds++;
     // Echo the assistant's tool-call turn back into the history verbatim, then
     // append each tool result as a role:"tool" message the model can read.
-    messages.push({
+    convo.push({
       role: "assistant",
       content: turn.content || null,
       tool_calls: turn.toolCalls,
@@ -266,12 +305,16 @@ export async function runConversation(
         tc.function.arguments,
       );
       log(`tool ${tc.function.name} -> ${summarize(result).slice(0, 80)}`);
-      messages.push({
+      convo.push({
         role: "tool",
         tool_call_id: tc.id,
         content: summarize(result),
       });
     }
+    // A round runs the LLM turn plus every tool call, each up to callTimeoutMs,
+    // so re-check the budget here too — otherwise a slow round could start
+    // another one. Exceeded → fall through to the forced summary turn.
+    if (opts.now() >= deadline) break;
   }
 
   // Cap or budget hit while the model still wanted tools. Force one tool-free
@@ -279,7 +322,7 @@ export async function runConversation(
   // silent. If even that yields nothing, fall back to a fixed line.
   if (!opts.stillRunning()) return { text: "", rounds };
   try {
-    const final = await chatWithTools(cfg, messages, tools, "none");
+    const final = await chatWithTools(cfg, convo, tools, "none");
     return { text: final.content || GIVE_UP, rounds };
   } catch {
     return { text: GIVE_UP, rounds };
