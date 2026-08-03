@@ -155,7 +155,32 @@ export async function chatWithTools(
   const message = data.choices?.[0]?.message;
   return {
     content: message?.content?.trim() ?? "",
-    toolCalls: message?.tool_calls ?? [],
+    toolCalls: sanitizeToolCalls(message?.tool_calls),
     finishReason: data.choices?.[0]?.finish_reason ?? "",
   };
+}
+
+// The response JSON is untrusted (a flaky local model can emit a malformed
+// tool_calls entry). The loop dereferences id / function.name / function.arguments
+// on each call, so drop any entry missing those rather than casting blindly and
+// dispatching garbage. arguments is normalised to a string ("" when absent) since
+// the caller JSON.parses it.
+function sanitizeToolCalls(raw: unknown): ToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((c) => {
+    const call = c as {
+      id?: unknown;
+      function?: { name?: unknown; arguments?: unknown };
+    };
+    const name = call.function?.name;
+    if (typeof call.id !== "string" || typeof name !== "string") return [];
+    const args = call.function?.arguments;
+    return [
+      {
+        id: call.id,
+        type: "function" as const,
+        function: { name, arguments: typeof args === "string" ? args : "" },
+      },
+    ];
+  });
 }

@@ -383,3 +383,60 @@ test("chatWithTools maps a timeout the same way chat does", async () => {
   );
   await srv.close();
 });
+
+test("chatWithTools drops malformed tool_calls, keeps the well-formed ones", async () => {
+  const srv = await startServer();
+  // A flaky model can emit junk entries: missing id, missing function, a
+  // non-string arguments. The good one must survive; the rest are dropped so
+  // the loop never dereferences undefined or dispatches garbage.
+  srv.setJson({
+    choices: [
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: "ok",
+              type: "function",
+              function: { name: "a", arguments: '{"x":1}' },
+            },
+            { type: "function", function: { name: "no_id" } }, // missing id
+            { id: "no_fn", type: "function" }, // missing function
+            { id: "n", type: "function", function: { name: 42 } }, // non-string name
+            { id: "coerce", type: "function", function: { name: "b" } }, // arguments absent -> ""
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  });
+  const turn = await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "x" }],
+    TOOLS,
+  );
+  assert.equal(turn.toolCalls.length, 2, "only the two valid calls survive");
+  assert.equal(turn.toolCalls[0]!.id, "ok");
+  assert.equal(turn.toolCalls[0]!.function.arguments, '{"x":1}');
+  assert.equal(turn.toolCalls[1]!.id, "coerce");
+  assert.equal(
+    turn.toolCalls[1]!.function.arguments,
+    "",
+    "absent arguments normalised to empty string",
+  );
+  await srv.close();
+});
+
+test("chatWithTools tolerates a response with no choices", async () => {
+  const srv = await startServer();
+  srv.setJson({ choices: [] });
+  const turn = await chatWithTools(
+    cfg(srv.baseUrl),
+    [{ role: "user", content: "x" }],
+    TOOLS,
+  );
+  assert.equal(turn.content, "", "no choices -> empty content, no throw");
+  assert.deepEqual(turn.toolCalls, []);
+  assert.equal(turn.finishReason, "");
+  await srv.close();
+});
