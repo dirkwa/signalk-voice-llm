@@ -208,7 +208,17 @@ export class Toolset {
     if (!target) return `error: unknown tool "${fnName}"`;
     let args: Record<string, unknown>;
     try {
-      args = argsJson ? (JSON.parse(argsJson) as Record<string, unknown>) : {};
+      const parsed = argsJson ? JSON.parse(argsJson) : {};
+      // MCP tool arguments must be an object; a model can emit a bare scalar or
+      // null, which would be an invalid tools/call payload.
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        return `error: arguments for "${fnName}" must be a JSON object`;
+      }
+      args = parsed as Record<string, unknown>;
     } catch {
       return `error: could not parse arguments for "${fnName}"`;
     }
@@ -279,11 +289,21 @@ export async function runConversation(
   const convo: ChatMessage[] = [...messages];
   let rounds = 0;
 
+  // A per-call LlmConfig whose timeout is clamped to the time left in the whole
+  // conversation, so an individual request can't overrun the budget by up to a
+  // full cfg.timeoutMs. Returns null when no budget remains at all.
+  const withRemainingTimeout = (): LlmConfig | null => {
+    const remaining = deadline - opts.now();
+    if (remaining <= 0) return null;
+    return { ...cfg, timeoutMs: Math.min(cfg.timeoutMs, remaining) };
+  };
+
   for (let iter = 0; iter < opts.maxIterations; iter++) {
     if (!opts.stillRunning()) return { text: "", rounds };
-    if (opts.now() >= deadline) break;
+    const roundCfg = withRemainingTimeout();
+    if (!roundCfg) break;
 
-    const turn = await chatWithTools(cfg, convo, tools, "auto");
+    const turn = await chatWithTools(roundCfg, convo, tools, "auto");
     if (!opts.stillRunning()) return { text: "", rounds };
 
     if (turn.toolCalls.length === 0) {
@@ -321,8 +341,12 @@ export async function runConversation(
   // turn so it summarises what it has into a spoken answer instead of going
   // silent. If even that yields nothing, fall back to a fixed line.
   if (!opts.stillRunning()) return { text: "", rounds };
+  // Only attempt the summary if there's budget left — otherwise firing another
+  // request would push total time past the budget the caller set.
+  const finalCfg = withRemainingTimeout();
+  if (!finalCfg) return { text: GIVE_UP, rounds };
   try {
-    const final = await chatWithTools(cfg, convo, tools, "none");
+    const final = await chatWithTools(finalCfg, convo, tools, "none");
     return { text: final.content || GIVE_UP, rounds };
   } catch {
     return { text: GIVE_UP, rounds };

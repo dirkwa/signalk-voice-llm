@@ -13,6 +13,7 @@ process.env.TZ = "UTC";
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
+import * as http from "node:http";
 import {
   createMockApp,
   settle,
@@ -49,6 +50,16 @@ function configFor(baseUrl: string, over: Record<string, unknown> = {}) {
     },
     ...over,
   };
+}
+
+// A loopback MCP URL whose port was bound then closed, so connections are
+// refused (a real dead server) rather than pointing at the odd port 1.
+async function refusedLoopbackUrl(): Promise<string> {
+  const srv = http.createServer();
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as import("node:net").AddressInfo).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  return `http://127.0.0.1:${port}/mcp`;
 }
 
 test("speaks the LLM reply back to the satellite that asked", async () => {
@@ -863,12 +874,15 @@ test("drives an MCP tool and speaks the model's summary", async () => {
 test("falls back to the plain chat path when no MCP server answers", async () => {
   // tools.enabled but the only server is dead: the plugin must skip it and
   // behave exactly like the no-tools install (single-shot chat, no tool prompt).
+  // Bind a loopback port then close it, so the URL is a real-but-refused
+  // endpoint (not the odd port 1). The toolset connect is fire-and-forget and
+  // retries in the background; a command arriving before it resolves finds no
+  // toolset and takes the plain path — which is exactly the fallback we assert.
+  const deadUrl = await refusedLoopbackUrl();
   const llm = await startFakeLlm("Your depth is 4.2 metres.");
   const mock = createMockApp();
   const plugin = pluginFactory(mock.app);
-  plugin.start(
-    toolConfig(llm.baseUrl, "http://127.0.0.1:1/mcp", {}), // closed port
-  );
+  plugin.start(toolConfig(llm.baseUrl, deadUrl, {}));
   mock.provideSay();
   mock.sendCommand("what's my depth", "cockpit");
   await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
@@ -885,6 +899,23 @@ test("falls back to the plain chat path when no MCP server answers", async () =>
     { text: "Your depth is 4.2 metres.", targets: ["cockpit"] },
   ]);
   plugin.stop();
+  await llm.close();
+});
+
+test("stop() during an in-flight toolset connect does not throw or leak", async () => {
+  // A refused server makes the toolset retry in the background; stopping while
+  // that connect is in flight must tear it down (not leave a retry loop
+  // running) and must never throw out of start()/stop().
+  const deadUrl = await refusedLoopbackUrl();
+  const llm = await startFakeLlm("ok");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  assert.doesNotThrow(() => plugin.start(toolConfig(llm.baseUrl, deadUrl, {})));
+  // Stop immediately, while connect() is still retrying.
+  assert.doesNotThrow(() => plugin.stop());
+  // Give any pending retry a moment; nothing should be spoken or error out.
+  await settle();
+  assert.deepEqual(mock.spoken, []);
   await llm.close();
 });
 

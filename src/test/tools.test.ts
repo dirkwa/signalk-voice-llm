@@ -332,6 +332,38 @@ test("an unknown tool name is reported back, never dispatched", async () => {
   await mcp.close();
 });
 
+test("rejects non-object tool arguments without dispatching", async () => {
+  const mcp = await startMcp();
+  // A flaky model can emit a bare scalar/null as arguments, which is not a
+  // valid tools/call payload — it must be reported back, not sent.
+  const llm = await startLlm([
+    { toolCalls: [{ id: "c1", name: "fsk__set_view", arguments: "5" }] },
+    { content: "I couldn't run that." },
+  ]);
+  const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
+  await toolset.connect();
+  const res = await runConversation(
+    cfg(llm.baseUrl),
+    [{ role: "user", content: "do a thing" }],
+    toolset,
+    loopOpts(),
+  );
+  assert.equal(res.text, "I couldn't run that.");
+  assert.equal(
+    mcp.calls.length,
+    0,
+    "the scalar-args call never reached the server",
+  );
+  const second = llm.requests[1] as {
+    messages: { role: string; content: string }[];
+  };
+  const toolMsg = second.messages.find((m) => m.role === "tool")!;
+  assert.match(toolMsg.content, /must be a JSON object/);
+  await toolset.close();
+  await llm.close();
+  await mcp.close();
+});
+
 test("hitting the iteration cap forces a tool-free summary turn", async () => {
   const mcp = await startMcp();
   // The model keeps asking for tools every round; the cap must break the loop
@@ -452,21 +484,20 @@ test("retries a server that isn't ready yet, then connects", async () => {
   await mcp.close();
 });
 
-test("the wall-clock budget forces a tool-free summary turn", async () => {
+test("an exhausted budget stops the loop and skips the summary request", async () => {
   const mcp = await startMcp();
-  // The model would keep calling tools forever; the budget (not the cap) must
-  // break the loop. A fake clock jumps past the deadline after the first round.
-  // Round 1 calls a tool; the budget then trips, so the NEXT (forced,
-  // tool_choice:none) turn is the summary.
+  // Round 1 calls a tool; the clock then jumps past the deadline, so the loop
+  // breaks AND the forced summary is skipped (firing it would overrun the
+  // budget). The reply falls back to the give-up line, and only the one round's
+  // request reached the LLM.
   const llm = await startLlm([
     { toolCalls: [{ id: "a", name: "fsk__set_view", arguments: "{}" }] },
-    { content: "Summarised what I had when time ran out." },
+    { content: "should never be requested" },
   ]);
   const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
   await toolset.connect();
-  // Controlled clock: 0 for the deadline calc and the first round's start-gate,
-  // then jump past the 1000 ms deadline so the post-round re-check breaks the
-  // loop into the forced summary turn (rather than the iteration cap).
+  // 0 for the deadline calc and the first round's start-gate, then past the
+  // 1000 ms deadline for every check afterward.
   let call = 0;
   const res = await runConversation(
     cfg(llm.baseUrl),
@@ -478,12 +509,9 @@ test("the wall-clock budget forces a tool-free summary turn", async () => {
       now: () => (call++ < 2 ? 0 : 5000),
     }),
   );
-  assert.equal(res.text, "Summarised what I had when time ran out.");
-  // The last request must have forced tool_choice:"none".
-  const forced = llm.requests[llm.requests.length - 1] as {
-    tool_choice: string;
-  };
-  assert.equal(forced.tool_choice, "none");
+  assert.equal(res.text, "Sorry, I couldn't finish that.");
+  assert.equal(res.rounds, 1, "one round ran before the budget tripped");
+  assert.equal(llm.requests.length, 1, "no summary request past the deadline");
   await toolset.close();
   await llm.close();
   await mcp.close();

@@ -172,9 +172,13 @@ module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
   let say: SayFn | null = null;
   let running = false;
-  // The live MCP tool connections for this run, or null when tools are off /
-  // unconfigured. Built asynchronously in start(); torn down in stop().
+  // The PUBLISHED toolset onCommand uses, set only after connect() resolves; or
+  // null when tools are off / unconfigured.
   let toolset: Toolset | null = null;
+  // The toolset currently being connected (set before connect() starts), so
+  // stop() can tear it down even mid-connect — otherwise its retry loop would
+  // keep running after the plugin stopped, since it hasn't been published yet.
+  let pendingToolset: Toolset | null = null;
   // Bumped on every start()/stop() so a connect() that finishes after a restart
   // doesn't publish a stale toolset.
   let toolsGeneration = 0;
@@ -451,6 +455,10 @@ module.exports = function (app: App) {
           toolsCfg.callTimeoutMs,
           (m) => app.debug(m),
         );
+        // Track it for teardown BEFORE connect() runs, so a stop() during the
+        // (retrying) connect closes it and its retry loop exits on its next
+        // `closed` check — the generation guard alone only blocks publication.
+        pendingToolset = built;
         void built
           .connect()
           .then(() => {
@@ -469,6 +477,11 @@ module.exports = function (app: App) {
             app.error(
               `tool setup failed: ${err instanceof Error ? err.message : String(err)}`,
             );
+          })
+          .finally(() => {
+            // Only clear the pending ref if it still points at this build (a
+            // newer start() may have replaced it).
+            if (pendingToolset === built) pendingToolset = null;
           });
       }
 
@@ -642,9 +655,16 @@ module.exports = function (app: App) {
       // can't publish a stale toolset after a restart. Unlike say(), these are
       // per-run sockets with nothing to preserve across a stop()/start().
       toolsGeneration++;
+      // Close both the published toolset and any still-connecting one, so a
+      // stop() mid-connect stops the retry loop (Toolset.close() sets `closed`,
+      // which connect() checks each attempt).
       if (toolset) {
         void toolset.close();
         toolset = null;
+      }
+      if (pendingToolset) {
+        void pendingToolset.close();
+        pendingToolset = null;
       }
       // Deliberately keep `say`: SignalK keeps the plugin module loaded across
       // a stop()/start() cycle (e.g. a config change), but PropertyValues does
