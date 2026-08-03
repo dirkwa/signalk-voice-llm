@@ -7,6 +7,7 @@ import {
   WEATHER_DEFAULTS,
 } from "./weather";
 import { PROVIDERS, ProviderId, resolveBaseUrl } from "./providers";
+import { Toolset, runConversation, ToolsConfig } from "./tools";
 
 // ---------------------------------------------------------------------------
 // SignalK plugin: voice.command -> LLM -> say()
@@ -74,6 +75,9 @@ interface Config {
   weather: {
     enabled: boolean;
   } & WeatherConfig;
+  // Let the model call tools on configured MCP servers (e.g. fsk-mcp driving
+  // the chart plotter). Off by default; a no-op with no servers configured.
+  tools: ToolsConfig;
   replyTargetOriginOnly: boolean;
   speakErrors: boolean;
 }
@@ -91,6 +95,18 @@ const DEFAULT_SYSTEM_PROMPT =
   "simple questions, a short paragraph when the topic deserves it. The " +
   "question was transcribed from speech and may be misheard, so interpret " +
   'it sensibly in a nautical context (e.g. "debt" likely means "depth").';
+
+// Appended to the system prompt only when tools are active, so the model knows
+// how to use them and — crucially for a spoken assistant — that tool results
+// are data for it, not text to read aloud.
+const TOOL_MODE_PROMPT =
+  "\n\nYou can use tools to act on the skipper's behalf (for example to control " +
+  "the chart plotter). Call a tool only when the request needs it; answer " +
+  "directly otherwise. Tool results are data for you, not for the skipper — " +
+  "never read JSON, ids, or coordinates aloud; once you've done what was asked, " +
+  "report the outcome in one short spoken sentence. Before an action that " +
+  "changes the boat's state (creating or activating a route, sending a value), " +
+  "make sure that is clearly what was asked.";
 
 // Signal K does not seed schema defaults at runtime: start() receives whatever
 // is in the saved config, which is `{}` on first enable and may be a partial
@@ -121,6 +137,16 @@ const SCHEMA_DEFAULTS: Config = {
     enabled: true,
     ...WEATHER_DEFAULTS,
   },
+  tools: {
+    // Off by default: small local models are unreliable at tool-calling, and
+    // there is nothing to call until a server is configured. Opt in when
+    // pointing at a capable model + an MCP server.
+    enabled: false,
+    maxIterations: 3,
+    conversationBudgetMs: 45000,
+    callTimeoutMs: 8000,
+    mcpServers: [],
+  },
   replyTargetOriginOnly: true,
   speakErrors: true,
 };
@@ -136,6 +162,9 @@ function withDefaults(incoming: Partial<Config> | undefined): Config {
     llm: { ...SCHEMA_DEFAULTS.llm, ...(cfg.llm ?? {}) },
     context: { ...SCHEMA_DEFAULTS.context, ...(cfg.context ?? {}) },
     weather: { ...SCHEMA_DEFAULTS.weather, ...(cfg.weather ?? {}) },
+    // mcpServers is an array: a plain spread replaces it wholesale, which is
+    // the intended semantic — a saved server list is not deep-merged.
+    tools: { ...SCHEMA_DEFAULTS.tools, ...(cfg.tools ?? {}) },
   };
 }
 
@@ -143,6 +172,16 @@ module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
   let say: SayFn | null = null;
   let running = false;
+  // The PUBLISHED toolset onCommand uses, set only after connect() resolves; or
+  // null when tools are off / unconfigured.
+  let toolset: Toolset | null = null;
+  // The toolset currently being connected (set before connect() starts), so
+  // stop() can tear it down even mid-connect — otherwise its retry loop would
+  // keep running after the plugin stopped, since it hasn't been published yet.
+  let pendingToolset: Toolset | null = null;
+  // Bumped on every start()/stop() so a connect() that finishes after a restart
+  // doesn't publish a stale toolset.
+  let toolsGeneration = 0;
 
   const plugin = {
     id: PLUGIN_ID,
@@ -266,6 +305,81 @@ module.exports = function (app: App) {
             },
           },
         },
+        tools: {
+          type: "object",
+          title: "Tools (MCP)",
+          description:
+            "Let the assistant call tools on MCP servers you configure — e.g. fsk-mcp to drive the Freeboard-SK chart plotter (pan/zoom, routes, points of interest). Off by default. NOTE: tool-calling needs a capable model — small local models (e.g. qwen2.5-7b) are unreliable at it; use a hosted model (Groq/Cerebras 70B) or a tool-tuned local model. With no servers listed this section does nothing.",
+          properties: {
+            enabled: {
+              type: "boolean",
+              title: "Enable tool-calling",
+              default: SCHEMA_DEFAULTS.tools.enabled,
+            },
+            maxIterations: {
+              type: "number",
+              title: "Max tool rounds per command",
+              minimum: 1,
+              maximum: 10,
+              description:
+                "How many times the model may call tools before it must answer (keeps spoken replies prompt).",
+              default: SCHEMA_DEFAULTS.tools.maxIterations,
+            },
+            conversationBudgetMs: {
+              type: "number",
+              title: "Overall time budget (ms)",
+              minimum: 5000,
+              maximum: 120000,
+              description:
+                "Wall-clock cap for the whole tool conversation. When it runs out the assistant stops and gives a short fallback reply rather than starting more work. (When the tool-round cap is reached with time to spare, it instead summarises what it found.)",
+              default: SCHEMA_DEFAULTS.tools.conversationBudgetMs,
+            },
+            callTimeoutMs: {
+              type: "number",
+              title: "Per tool-call timeout (ms)",
+              minimum: 1000,
+              maximum: 30000,
+              description:
+                "Timeout for a single tool call. fsk-mcp relays to a browser tab and can stall, so keep this short.",
+              default: SCHEMA_DEFAULTS.tools.callTimeoutMs,
+            },
+            mcpServers: {
+              type: "array",
+              title: "MCP servers",
+              description:
+                "MCP servers to expose as tools. fsk-mcp defaults to http://127.0.0.1:3013/mcp and needs a Freeboard-SK tab open to answer.",
+              items: {
+                type: "object",
+                properties: {
+                  name: {
+                    type: "string",
+                    title: "Name",
+                    description:
+                      "Short label used to namespace this server's tools, e.g. fsk.",
+                  },
+                  url: {
+                    type: "string",
+                    title: "URL",
+                    description: "Streamable-HTTP MCP endpoint, e.g. /mcp.",
+                  },
+                  token: {
+                    type: "string",
+                    title: "Token (optional)",
+                    description:
+                      "Bearer token, if the server requires one (sent as Authorization: Bearer …).",
+                  },
+                  enabled: {
+                    type: "boolean",
+                    title: "Enabled",
+                    default: true,
+                  },
+                },
+                required: ["name", "url"],
+              },
+              default: SCHEMA_DEFAULTS.tools.mcpServers,
+            },
+          },
+        },
         replyTargetOriginOnly: {
           type: "boolean",
           title: "Reply only to the satellite that asked",
@@ -321,6 +435,54 @@ module.exports = function (app: App) {
         app.error(
           "app.onPropertyValues unavailable — cannot reach signalk-wyoming say()",
         );
+      }
+
+      // --- Build the MCP toolset (async: it connects + discovers tools).
+      // Off unless enabled AND at least one enabled server is configured, so a
+      // default install is a byte-for-byte no-op on the existing chat path. A
+      // server that fails to connect (e.g. fsk-mcp with no Freeboard tab yet)
+      // is skipped inside connect(); we just end up with no tools.
+      const toolsCfg = config.tools;
+      const wantTools =
+        toolsCfg.enabled &&
+        toolsCfg.mcpServers.some((s) => s.enabled !== false && s.url);
+      // A generation guard: if stop()/start() cycles while connect() is in
+      // flight, don't publish (or leak) a toolset from the old generation.
+      const myGeneration = ++toolsGeneration;
+      if (wantTools) {
+        const built = new Toolset(
+          toolsCfg.mcpServers,
+          toolsCfg.callTimeoutMs,
+          (m) => app.debug(m),
+        );
+        // Track it for teardown BEFORE connect() runs, so a stop() during the
+        // (retrying) connect closes it and its retry loop exits on its next
+        // `closed` check — the generation guard alone only blocks publication.
+        pendingToolset = built;
+        void built
+          .connect()
+          .then(() => {
+            if (myGeneration !== toolsGeneration || !running) {
+              // Superseded by a restart/stop while connecting — discard.
+              return built.close();
+            }
+            toolset = built;
+            app.debug(
+              built.hasTools
+                ? `tools: ${built.tools.length} available`
+                : "tools: enabled but no server answered",
+            );
+          })
+          .catch((err) => {
+            app.error(
+              `tool setup failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          })
+          .finally(() => {
+            // Only clear the pending ref if it still points at this build (a
+            // newer start() may have replaced it).
+            if (pendingToolset === built) pendingToolset = null;
+          });
       }
 
       // --- Subscribe to voice.command deltas.
@@ -382,12 +544,17 @@ module.exports = function (app: App) {
           }
         }
 
+        // Use the tool loop only when a toolset actually discovered tools;
+        // otherwise the call is the unchanged single-shot chat path.
+        const activeTools = toolset && toolset.hasTools ? toolset : null;
+
         const system =
           (config.systemPrompt || DEFAULT_SYSTEM_PROMPT) +
           (boat ? `\n\nCurrent boat data:\n${boat}` : "") +
           (weather
             ? `\n\nWeather and sea conditions at the boat:\n${weather}`
-            : "");
+            : "") +
+          (activeTools ? TOOL_MODE_PROMPT : "");
         const messages: ChatMessage[] = [
           { role: "system", content: system },
           { role: "user", content: text },
@@ -395,7 +562,17 @@ module.exports = function (app: App) {
 
         let reply: string;
         try {
-          reply = (await chat(llmCfg, messages)).text;
+          reply = activeTools
+            ? (
+                await runConversation(llmCfg, messages, activeTools, {
+                  maxIterations: toolsCfg.maxIterations,
+                  conversationBudgetMs: toolsCfg.conversationBudgetMs,
+                  now: () => Date.now(),
+                  stillRunning: () => running,
+                  log: (m) => app.debug(m),
+                })
+              ).text
+            : (await chat(llmCfg, messages)).text;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           app.error(`LLM failed: ${msg}`);
@@ -416,6 +593,13 @@ module.exports = function (app: App) {
           app.debug(
             "dropping reply — plugin stopped while the LLM was working",
           );
+          return;
+        }
+
+        // The tool loop returns "" when it was dropped mid-flight; with the
+        // plugin still running that means nothing to say. Don't speak silence.
+        if (!reply) {
+          app.debug("empty reply — nothing to speak");
           return;
         }
 
@@ -467,6 +651,21 @@ module.exports = function (app: App) {
 
     stop() {
       running = false;
+      // Tear down MCP connections and invalidate any in-flight connect() so it
+      // can't publish a stale toolset after a restart. Unlike say(), these are
+      // per-run sockets with nothing to preserve across a stop()/start().
+      toolsGeneration++;
+      // Close both the published toolset and any still-connecting one, so a
+      // stop() mid-connect stops the retry loop (Toolset.close() sets `closed`,
+      // which connect() checks each attempt).
+      if (toolset) {
+        void toolset.close();
+        toolset = null;
+      }
+      if (pendingToolset) {
+        void pendingToolset.close();
+        pendingToolset = null;
+      }
       // Deliberately keep `say`: SignalK keeps the plugin module loaded across
       // a stop()/start() cycle (e.g. a config change), but PropertyValues does
       // not reliably re-deliver signalk-wyoming.api's history to the

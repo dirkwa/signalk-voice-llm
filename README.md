@@ -53,6 +53,16 @@ you speak  →  voice.command (SignalK)
   supplies the boat's local time, the assistant includes it in the context and
   can reason about "now", "tonight", and when the next tide is. Without such a
   plugin, the time line is simply omitted.
+- **Can call tools (MCP)** — optionally, the assistant can act on the boat's
+  behalf by calling tools on [MCP](https://modelcontextprotocol.io/) servers you
+  configure. The first target is
+  [fsk-mcp](https://github.com/SignalK/freeboard-sk/tree/master/dev-tools/fsk-mcp),
+  which drives the Freeboard-SK chart plotter — "center the chart on the marina",
+  "zoom to my active route", "find anchorages near me". Tools are **off by
+  default** and only ever act when you enable them and list a server. **Tool
+  calling needs a capable model** — small local models (e.g. Qwen2.5-7B) are
+  unreliable at emitting tool calls, so use a hosted model (Groq/Cerebras 70B) or
+  a tool-tuned local model when you turn this on. See _Tools (MCP)_ below.
 
 ## Requirements
 
@@ -86,20 +96,60 @@ you speak  →  voice.command (SignalK)
 
 In the plugin config:
 
-| Field                                         | Notes                                                                                                                   |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `llm.provider`                                | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                                                                  |
-| `llm.baseUrl`                                 | used by `local`/`custom` (a hosted provider overrides it)                                                               |
-| `llm.model`                                   | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`)                                       |
-| `llm.apiKey`                                  | empty for local; required for a hosted provider                                                                         |
-| `llm.temperature` / `maxTokens` / `timeoutMs` | generation + request tuning                                                                                             |
-| `systemPrompt`                                | how the assistant behaves (open-topic by default; edit to make it terser or boat-only — keep it speakable, no markdown) |
-| `context.*`                                   | which boat-data groups to feed the LLM                                                                                  |
-| `weather.enabled`                             | add weather + sea state from the SignalK Weather API (needs a weather-provider plugin)                                  |
-| `weather.forecastHours`                       | how many forecast intervals ahead to summarise (1–48)                                                                   |
-| `weather.marine`                              | also include sea state (waves + swell) when the provider supplies it                                                    |
-| `replyTargetOriginOnly`                       | reply only to the satellite that asked (else all)                                                                       |
-| `speakErrors`                                 | speak a short error if the LLM is unreachable                                                                           |
+| Field                                                            | Notes                                                                                                                   |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `llm.provider`                                                   | `local`, `groq`, `cerebras`, `openrouter`, or `custom`                                                                  |
+| `llm.baseUrl`                                                    | used by `local`/`custom` (a hosted provider overrides it)                                                               |
+| `llm.model`                                                      | model id for the provider (e.g. `qwen2.5-7b-instruct`, `llama-3.3-70b-versatile`)                                       |
+| `llm.apiKey`                                                     | empty for local; required for a hosted provider                                                                         |
+| `llm.temperature` / `maxTokens` / `timeoutMs`                    | generation + request tuning                                                                                             |
+| `systemPrompt`                                                   | how the assistant behaves (open-topic by default; edit to make it terser or boat-only — keep it speakable, no markdown) |
+| `context.*`                                                      | which boat-data groups to feed the LLM                                                                                  |
+| `weather.enabled`                                                | add weather + sea state from the SignalK Weather API (needs a weather-provider plugin)                                  |
+| `weather.forecastHours`                                          | how many forecast intervals ahead to summarise (1–48)                                                                   |
+| `weather.marine`                                                 | also include sea state (waves + swell) when the provider supplies it                                                    |
+| `tools.enabled`                                                  | let the model call MCP tools (off by default — see _Tools (MCP)_)                                                       |
+| `tools.mcpServers`                                               | the MCP servers to expose as tools (`name` + `url`, optional `token`)                                                   |
+| `tools.maxIterations` / `conversationBudgetMs` / `callTimeoutMs` | bound how long a tool conversation may run                                                                              |
+| `replyTargetOriginOnly`                                          | reply only to the satellite that asked (else all)                                                                       |
+| `speakErrors`                                                    | speak a short error if the LLM is unreachable                                                                           |
+
+## Tools (MCP)
+
+The assistant can optionally call tools on
+[MCP](https://modelcontextprotocol.io/) servers you configure, so it can _act_,
+not just answer — for example drive the chart plotter. It is a generic MCP
+client: it connects to each server, discovers its tools, and offers them to the
+model; any Streamable-HTTP MCP server works, not just the one below.
+
+To enable:
+
+1. Set `tools.enabled` on.
+2. Add a server under `tools.mcpServers`, e.g. `name: fsk`,
+   `url: http://127.0.0.1:3013/mcp`.
+3. Point the plugin at a **capable model** (see the caveat below).
+
+**First target — fsk-mcp (Freeboard-SK).**
+[fsk-mcp](https://github.com/SignalK/freeboard-sk/tree/master/dev-tools/fsk-mcp)
+exposes the Freeboard-SK plotter as MCP tools (set the map view, list/inspect
+routes, query resources, filters). With it configured you can say "center the
+chart on the marina" or "zoom to my active route". Note that fsk-mcp is a
+**development tool**: it relays each call to a **live Freeboard-SK browser tab**,
+so a tab must be open for the tools to answer, and it is not meant for an
+unattended production server. Getting it onto a boat cleanly (no dev-only
+plugin, no browser tab required) is tracked upstream in Freeboard-SK.
+
+> **A capable model is required.** Tool calling asks the model to emit
+> structured `tool_calls`. Small local models (e.g. Qwen2.5-7B) do this
+> unreliably or not at all, so with tools on, prefer a hosted model
+> (Groq/Cerebras 70B) or a tool-tuned local model. This is why tools are **off
+> by default** — enabling them would degrade the common local-model install.
+
+Safety notes for a spoken assistant: replies stay speakable (the model is told
+tool results are data, not text to read aloud), and every tool round trip is
+bounded by `maxIterations` and `conversationBudgetMs` so a reply can't run away.
+Whatever tools a configured server exposes are available to the model once
+enabled — including any that change boat state — so only add servers you trust.
 
 ## Notes
 
