@@ -331,7 +331,7 @@ module.exports = function (app: App) {
               minimum: 5000,
               maximum: 120000,
               description:
-                "Wall-clock cap for the whole tool conversation; when it passes, the assistant summarises what it has.",
+                "Wall-clock cap for the whole tool conversation. When it runs out the assistant stops and gives a short fallback reply rather than starting more work. (When the tool-round cap is reached with time to spare, it instead summarises what it found.)",
               default: SCHEMA_DEFAULTS.tools.conversationBudgetMs,
             },
             callTimeoutMs: {

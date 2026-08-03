@@ -260,8 +260,10 @@ export interface ConversationResult {
 /**
  * The bounded agentic loop. Offers `toolset`'s tools to the model; each round,
  * if the model asks for tools, run them and feed the results back; stop when it
- * answers in prose, or when the iteration cap or the wall-clock budget is hit
- * (then force one tool-free turn so the user still gets a spoken summary).
+ * answers in prose. If the iteration cap is hit with budget to spare, force one
+ * tool-free turn so the user still gets a spoken summary. If instead the
+ * wall-clock budget runs out, stop without another request and return the fixed
+ * fallback line — firing a summary then would overrun the budget.
  *
  * `stillRunning` is checked after every round trip so a reply is dropped if the
  * plugin was stopped mid-loop (the loop can span many seconds). Returns the
