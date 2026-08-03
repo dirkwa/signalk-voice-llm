@@ -13,7 +13,13 @@ process.env.TZ = "UTC";
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
-import { createMockApp, settle, startFakeLlm, waitFor } from "./harness";
+import {
+  createMockApp,
+  settle,
+  startFakeLlm,
+  startFakeMcp,
+  waitFor,
+} from "./harness";
 import { PROVIDERS, resolveBaseUrl } from "../providers";
 
 // require() rather than import: the plugin is CommonJS
@@ -796,4 +802,115 @@ test("the network-isolation guard blocks a non-loopback fetch", async () => {
   const res = await fetch(`${llm.baseUrl}/models`).catch(() => null);
   assert.ok(res, "loopback fetch must not be blocked");
   await llm.close();
+});
+
+// --- Tool-calling (MCP) end to end --------------------------------------
+
+// The whole tool path through the real plugin: voice.command -> the model
+// asks for a tool -> the plugin drives the MCP server -> feeds the result
+// back -> the model answers -> say(). Nothing mocked; both stubs are loopback.
+function toolConfig(
+  llmBaseUrl: string,
+  mcpUrl: string,
+  over: Record<string, unknown> = {},
+) {
+  return configFor(llmBaseUrl, {
+    tools: {
+      enabled: true,
+      maxIterations: 3,
+      conversationBudgetMs: 30000,
+      callTimeoutMs: 3000,
+      mcpServers: [{ name: "fsk", url: mcpUrl }],
+    },
+    ...over,
+  });
+}
+
+test("drives an MCP tool and speaks the model's summary", async () => {
+  const mcp = await startFakeMcp();
+  const llm = await startFakeLlm();
+  // First turn: call the (namespaced) tool. Second turn: a spoken summary.
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "fsk__set_view", arguments: "{}" }] },
+    { content: "Centred the chart on the marina." },
+  ]);
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  plugin.start(toolConfig(llm.baseUrl, mcp.url));
+  mock.provideSay();
+  // The toolset connects asynchronously in start(); wait until it's ready.
+  await waitFor(
+    () => mock.debugLog.some((l) => l.includes("tools:")),
+    "the toolset never connected",
+  );
+
+  mock.sendCommand("center the map on the marina", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  assert.deepEqual(mock.spoken, [
+    { text: "Centred the chart on the marina.", targets: ["cockpit"] },
+  ]);
+  assert.equal(mcp.calls.length, 1, "the tool actually reached the MCP server");
+  assert.equal(mcp.calls[0]!.name, "set_view", "un-namespaced on the wire");
+  // The model was told it was in tool mode.
+  const sys = llm.requests[0]!.messages.find((m) => m.role === "system")!;
+  assert.match(sys.content, /Tool results are data for you/);
+  plugin.stop();
+  await llm.close();
+  await mcp.close();
+});
+
+test("falls back to the plain chat path when no MCP server answers", async () => {
+  // tools.enabled but the only server is dead: the plugin must skip it and
+  // behave exactly like the no-tools install (single-shot chat, no tool prompt).
+  const llm = await startFakeLlm("Your depth is 4.2 metres.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  plugin.start(
+    toolConfig(llm.baseUrl, "http://127.0.0.1:1/mcp", {}), // closed port
+  );
+  mock.provideSay();
+  mock.sendCommand("what's my depth", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  assert.equal(llm.requests.length, 1, "single-shot, no tool loop");
+  assert.equal(
+    llm.requests[0]!.messages.find(
+      (m) => m.role === "system",
+    )!.content.includes("Tool results are data for you"),
+    false,
+    "no tool-mode prompt when there are no tools",
+  );
+  assert.deepEqual(mock.spoken, [
+    { text: "Your depth is 4.2 metres.", targets: ["cockpit"] },
+  ]);
+  plugin.stop();
+  await llm.close();
+});
+
+test("tools disabled is the unchanged single-shot path", async () => {
+  const mcp = await startFakeMcp();
+  const llm = await startFakeLlm("Plain answer.");
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  // enabled:false even though a server is listed -> no tools.
+  plugin.start(
+    configFor(llm.baseUrl, {
+      tools: {
+        enabled: false,
+        maxIterations: 3,
+        conversationBudgetMs: 30000,
+        callTimeoutMs: 3000,
+        mcpServers: [{ name: "fsk", url: mcp.url }],
+      },
+    }),
+  );
+  mock.provideSay();
+  mock.sendCommand("hello", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+  assert.equal(mcp.calls.length, 0, "no MCP call when tools are disabled");
+  assert.equal(llm.requests.length, 1);
+  plugin.stop();
+  await llm.close();
+  await mcp.close();
 });

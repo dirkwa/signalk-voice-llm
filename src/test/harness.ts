@@ -63,12 +63,23 @@ export interface LlmRequest {
   authorization?: string;
 }
 
+// A scripted turn: either prose, or a set of tool calls the model wants to run.
+export type LlmScriptTurn =
+  | { content: string }
+  | { toolCalls: { id: string; name: string; arguments: string }[] };
+
 export interface FakeLlm {
   baseUrl: string;
   /** Every request the plugin sent, in order. */
   requests: LlmRequest[];
   /** Replace the reply for subsequent requests. */
   setReply(text: string): void;
+  /**
+   * Drive the tool-calling loop: each request pops the next scripted turn (a
+   * tool-call turn or a prose turn). Once the script empties, falls back to the
+   * plain reply. Setting a script overrides setReply for as long as it lasts.
+   */
+  setScript(turns: LlmScriptTurn[]): void;
   /** Respond with an HTTP error instead of a completion. */
   setStatus(status: number, body?: string): void;
   /** Never respond, so the client's own timeout fires. */
@@ -81,6 +92,7 @@ export async function startFakeLlm(
 ): Promise<FakeLlm> {
   const requests: LlmRequest[] = [];
   let currentReply = reply;
+  let script: LlmScriptTurn[] | null = null;
   let status = 200;
   let errorBody = "";
   let hang = false;
@@ -117,11 +129,27 @@ export async function startFakeLlm(
         res.end(errorBody);
         return;
       }
+      // A scripted tool-calling turn, if a script is active and not exhausted.
+      const turn = script && script.length ? script.shift() : null;
+      const message =
+        turn && "toolCalls" in turn
+          ? {
+              role: "assistant",
+              content: null,
+              tool_calls: turn.toolCalls.map((t) => ({
+                id: t.id,
+                type: "function",
+                function: { name: t.name, arguments: t.arguments },
+              })),
+            }
+          : {
+              role: "assistant",
+              content: turn && "content" in turn ? turn.content : currentReply,
+            };
+      const finish = turn && "toolCalls" in turn ? "tool_calls" : "stop";
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
-        JSON.stringify({
-          choices: [{ message: { role: "assistant", content: currentReply } }],
-        }),
+        JSON.stringify({ choices: [{ message, finish_reason: finish }] }),
       );
     });
   });
@@ -142,6 +170,9 @@ export async function startFakeLlm(
     setReply(t) {
       currentReply = t;
     },
+    setScript(turns) {
+      script = turns;
+    },
     setStatus(s, body = "") {
       status = s;
       errorBody = body;
@@ -152,6 +183,96 @@ export async function startFakeLlm(
     async close() {
       for (const res of openResponses) res.destroy();
       openResponses.clear();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+// --- Fake MCP server -----------------------------------------------------
+//
+// A loopback Streamable-HTTP MCP server that serves one tool, so the e2e suite
+// can drive the plugin's tool-calling path end to end. Records each tools/call
+// so a test can assert the plugin reached it.
+
+export interface FakeMcp {
+  url: string;
+  /** Each tools/call the plugin made: the tool name and its arguments. */
+  calls: { name: string; arguments: unknown }[];
+  close(): Promise<void>;
+}
+
+export async function startFakeMcp(
+  tool: { name: string; description: string; result: string } = {
+    name: "set_view",
+    description: "center the map",
+    result: "the map is centered",
+  },
+): Promise<FakeMcp> {
+  const calls: FakeMcp["calls"] = [];
+  const server = http.createServer((req, res) => {
+    req.socket.unref();
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      let body: {
+        method?: string;
+        id?: unknown;
+        params?: { name?: string; arguments?: unknown };
+      } = {};
+      try {
+        body = JSON.parse(raw || "{}");
+      } catch {
+        /* leave empty */
+      }
+      const send = (obj: unknown, headers: http.OutgoingHttpHeaders = {}) => {
+        res.writeHead(200, { "Content-Type": "application/json", ...headers });
+        res.end(JSON.stringify(obj));
+      };
+      if (req.method === "DELETE") return void res.writeHead(200).end();
+      if (body.method && body.id === undefined)
+        return void res.writeHead(202).end();
+      if (body.method === "initialize")
+        return send(
+          { jsonrpc: "2.0", id: body.id, result: {} },
+          { "Mcp-Session-Id": "s1" },
+        );
+      if (body.method === "tools/list")
+        return send({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [
+              {
+                name: tool.name,
+                description: tool.description,
+                inputSchema: { type: "object", properties: {} },
+              },
+            ],
+          },
+        });
+      if (body.method === "tools/call") {
+        calls.push({
+          name: body.params?.name ?? "",
+          arguments: body.params?.arguments,
+        });
+        return send({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: tool.result }] },
+        });
+      }
+      res.writeHead(400).end();
+    });
+  });
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve()),
+  );
+  server.unref();
+  const port = (server.address() as AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    calls,
+    async close() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
