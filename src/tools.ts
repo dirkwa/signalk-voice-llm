@@ -14,6 +14,17 @@ import {
   type ToolSpec,
 } from "./llm";
 import { McpClient, type McpTool } from "./mcp";
+import { describePosition } from "./geocode";
+
+/** A live position supplier, so where_am_i works with no arguments. */
+export interface PositionSupplier {
+  (): { latitude?: number; longitude?: number };
+}
+
+/** Accept only finite numbers from model-supplied JSON. */
+function numArg(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
 
 // One configured MCP server.
 export interface McpServerConfig {
@@ -31,12 +42,11 @@ export interface ToolsConfig {
   mcpServers: McpServerConfig[];
 }
 
-// The tool_calls a name maps back to: which server client, and the ORIGINAL
-// (un-namespaced) tool name to send it.
-interface Dispatch {
-  client: McpClient;
-  toolName: string;
-}
+// The tool_calls a name maps back to: either an MCP server client plus the
+// ORIGINAL (un-namespaced) tool name, or a local handler that runs in-process.
+type Dispatch =
+  | { kind: "mcp"; client: McpClient; toolName: string }
+  | { kind: "local"; run: (args: Record<string, unknown>) => string };
 
 // OpenAI function names must match ^[a-zA-Z0-9_-]{1,64}$. Server names and tool
 // names are joined with a "__" delimiter; sanitise the joined result and keep a
@@ -82,6 +92,7 @@ export class Toolset {
     private readonly callTimeoutMs: number,
     private readonly log: (msg: string) => void = () => {},
     retry: { maxAttempts?: number; backoffMs?: number } = {},
+    private readonly position?: PositionSupplier,
   ) {
     this.maxAttempts = retry.maxAttempts ?? 5;
     this.backoffMs = retry.backoffMs ?? 2000;
@@ -98,17 +109,87 @@ export class Toolset {
   }
 
   /**
+   * Only the tools discovered from MCP servers — the local in-process tools are
+   * always present and would otherwise mask "no server answered" in both the
+   * per-server cap accounting and the startup log.
+   */
+  get mcpTools(): ToolSpec[] {
+    return this.specs.filter(
+      (s) => this.dispatch.get(s.function.name)?.kind === "mcp",
+    );
+  }
+
+  /**
    * Connect to every enabled server and discover its tools. Best-effort per
    * server: a server that fails to connect or list is logged and skipped, so
    * one dead server (e.g. fsk-mcp with no Freeboard tab yet) doesn't sink the
    * others. Never throws.
    */
   async connect(): Promise<void> {
+    this.registerLocalTools();
     for (const server of this.servers) {
       if (this.closed) return;
       if (server.enabled === false) continue;
       await this.connectServer(server);
     }
+  }
+
+  /**
+   * In-process tools, available with no MCP server configured and no network.
+   *
+   * where_am_i exists because small models answer coordinate-geography
+   * questions by guessing: given the boat's real position in Fiji, qwen2.5-7b
+   * confidently placed us near Brisbane. A lookup cannot be wrong that way.
+   */
+  private registerLocalTools(): void {
+    this.dispatch.set("where_am_i", {
+      kind: "local",
+      run: (args) => {
+        // The model is told to pass the position from the boat snapshot, but it
+        // routinely omits or garbles arguments — fall back to the live position
+        // the plugin already has rather than failing the call.
+        const lat = numArg(args["latitude"]) ?? this.position?.().latitude;
+        const lon = numArg(args["longitude"]) ?? this.position?.().longitude;
+        if (lat === undefined || lon === undefined) {
+          return "error: no position available (no GPS fix and none supplied)";
+        }
+        try {
+          return describePosition(lat, lon);
+        } catch (err) {
+          // A RangeError here means the model sent nonsense (often lat/long
+          // swapped); say so, so it can retry rather than narrate a bad answer.
+          return `error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+    });
+    this.specs.push({
+      type: "function",
+      function: {
+        name: "where_am_i",
+        description:
+          "Resolve a latitude/longitude to the country or maritime zone that " +
+          "contains it. Use this for ANY question about what country, waters, " +
+          "or territory the vessel is in — do not answer from the coordinates " +
+          "yourself. Works offline. Defaults to the vessel's current position " +
+          "when no arguments are given.",
+        parameters: {
+          type: "object",
+          properties: {
+            latitude: {
+              type: "number",
+              description:
+                "Decimal degrees, -90..90. Omit to use the vessel's.",
+            },
+            longitude: {
+              type: "number",
+              description:
+                "Decimal degrees, -180..180. Omit to use the vessel's.",
+            },
+          },
+          required: [],
+        },
+      },
+    });
   }
 
   // Connect one server, retrying a failed connection a few times. On a fresh
@@ -184,7 +265,7 @@ export class Toolset {
         const suffix = `_${n++}`;
         fnName = base.slice(0, 64 - suffix.length) + suffix;
       }
-      this.dispatch.set(fnName, { client, toolName: tool.name });
+      this.dispatch.set(fnName, { kind: "mcp", client, toolName: tool.name });
       this.specs.push({
         type: "function",
         function: {
@@ -221,6 +302,12 @@ export class Toolset {
       args = parsed as Record<string, unknown>;
     } catch {
       return `error: could not parse arguments for "${fnName}"`;
+    }
+    if (target.kind === "local") {
+      // Local handlers are synchronous and self-contained; they return their
+      // own error strings rather than throwing, so the loop can feed the text
+      // straight back to the model.
+      return target.run(args);
     }
     try {
       const res = await target.client.callTool(target.toolName, args);

@@ -443,9 +443,10 @@ module.exports = function (app: App) {
       // server that fails to connect (e.g. fsk-mcp with no Freeboard tab yet)
       // is skipped inside connect(); we just end up with no tools.
       const toolsCfg = config.tools;
-      const wantTools =
-        toolsCfg.enabled &&
-        toolsCfg.mcpServers.some((s) => s.enabled !== false && s.url);
+      // Tools-enabled is enough on its own: the toolset also carries in-process
+      // tools (where_am_i) that need no server, so a boat with no MCP server
+      // configured still gets them.
+      const wantTools = toolsCfg.enabled;
       // A generation guard: if stop()/start() cycles while connect() is in
       // flight, don't publish (or leak) a toolset from the old generation.
       const myGeneration = ++toolsGeneration;
@@ -454,6 +455,15 @@ module.exports = function (app: App) {
           toolsCfg.mcpServers,
           toolsCfg.callTimeoutMs,
           (m) => app.debug(m),
+          {},
+          () => {
+            // Live position for where_am_i when the model supplies none.
+            const raw: unknown = app.getSelfPath("navigation.position");
+            const v = (raw as { value?: unknown })?.value ?? raw;
+            const p = v as
+              { latitude?: number; longitude?: number } | undefined;
+            return { latitude: p?.latitude, longitude: p?.longitude };
+          },
         );
         // Track it for teardown BEFORE connect() runs, so a stop() during the
         // (retrying) connect closes it and its retry loop exits on its next

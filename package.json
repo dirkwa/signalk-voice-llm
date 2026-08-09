@@ -66,5 +66,8 @@
     "prettier": "^3.9.6",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.65.0"
+  },
+  "dependencies": {
+    "coordinate_to_country": "^1.1.0"
   }
 }
