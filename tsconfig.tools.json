@@ -1,0 +1,21 @@
+// Type-checks the repo's root-level tooling config, which the main tsconfig
+// structurally cannot: it sets rootDir "src" so that dist/ mirrors src/, and a
+// file outside rootDir is an error rather than something merely excluded.
+//
+// Separate module settings on purpose. eslint.config.ts is loaded by ESLint via
+// jiti as ESM, and the flat-config packages it imports only resolve under
+// "bundler" resolution — the CommonJS/node settings the plugin itself builds
+// with cannot see their type entry points. Emitting nothing keeps this a pure
+// check: the file is never compiled to dist, only verified.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["eslint.config.ts"]
+}
