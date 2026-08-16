@@ -199,6 +199,16 @@ Constraints that have bitten this setup before:
   untyped upstream.
 - `files` in package.json is an allowlist. `dist/`, the icon, README, and
   LICENSE ship; `src/` and `tsconfig.json` do not.
+- **Every source file in this repo is TypeScript**, tooling config included.
+  `eslint.config.ts` is loaded by ESLint through `jiti` (hence the devDep) and
+  type-checked by `npm run lint:config`, which `ci-lint` runs — so a broken
+  config fails the PR rather than being silently transpiled.
+- **`tsconfig.tools.json` is separate on purpose, not duplication.** The main
+  tsconfig sets `rootDir: "src"` so `dist/` mirrors `src/`, which makes a
+  root-level file an error rather than something merely excluded. It also
+  builds as CommonJS/node, and the flat-config packages `eslint.config.ts`
+  imports only resolve their type entry points under `"bundler"` resolution.
+  The tools config emits nothing — it is a pure check.
 
 ## File layout
 

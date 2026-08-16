@@ -15,8 +15,9 @@
     "watch": "tsc --watch",
     "prettier": "prettier --write .",
     "lint": "eslint --fix",
+    "lint:config": "tsc -p tsconfig.tools.json",
     "format": "npm run prettier && npm run lint",
-    "ci-lint": "eslint && prettier --check .",
+    "ci-lint": "eslint && npm run lint:config && prettier --check .",
     "test": "node --test \"dist/test/**/*.test.js\"",
     "build:all": "npm run ci-lint && npm run build && npm test",
     "prepublishOnly": "npm run build"
@@ -63,6 +64,7 @@
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.8.0",
+    "jiti": "^2.7.0",
     "prettier": "^3.9.6",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.65.0"
