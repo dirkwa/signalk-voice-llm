@@ -207,13 +207,13 @@ test("discovers, namespaces, and offers MCP tools to the model", async () => {
   const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
   await toolset.connect();
   assert.equal(toolset.hasTools, true);
-  assert.equal(toolset.tools.length, 1);
+  assert.equal(toolset.mcpTools.length, 1);
   assert.equal(
-    toolset.tools[0]!.function.name,
+    toolset.mcpTools[0]!.function.name,
     "fsk__set_view",
     "server name is prefixed with __",
   );
-  assert.deepEqual(toolset.tools[0]!.function.parameters, {
+  assert.deepEqual(toolset.mcpTools[0]!.function.parameters, {
     type: "object",
     properties: {},
   });
@@ -457,7 +457,8 @@ test("a server that won't connect is skipped, leaving no tools", async () => {
     { maxAttempts: 2, backoffMs: 10 }, // fast: don't wait the production backoff
   );
   await toolset.connect();
-  assert.equal(toolset.hasTools, false);
+  // Local tools are always registered; assert no SERVER tools survived.
+  assert.equal(toolset.mcpTools.length, 0);
   await toolset.close();
 });
 
@@ -540,7 +541,7 @@ test("truncates long tool names and disambiguates collisions within 64 chars", a
   const mcp = await startMcp([longA, longB, "short"]);
   const toolset = new Toolset([{ name: "fsk", url: mcp.url }], 3000);
   await toolset.connect();
-  const names = toolset.tools.map((t) => t.function.name);
+  const names = toolset.mcpTools.map((t) => t.function.name);
   assert.equal(names.length, 3);
   assert.equal(new Set(names).size, 3, "all names are distinct");
   for (const n of names) {
@@ -559,11 +560,110 @@ test("caps the tool surface per server and logs the drop", async () => {
     logs.push(m),
   );
   await toolset.connect();
-  assert.equal(toolset.tools.length, 32, "surface is capped at 32");
+  assert.equal(toolset.mcpTools.length, 32, "surface is capped at 32");
   assert.ok(
     logs.some((l) => /capping at 32/.test(l)),
     "logs what was dropped",
   );
   await toolset.close();
   await mcp.close();
+});
+
+test("where_am_i is offered without any MCP server and resolves the country", async () => {
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({
+      latitude: -17.7696627,
+      longitude: 177.1802972,
+    }),
+  );
+  await toolset.connect();
+  // No servers: the local tool is the whole surface, and the loop must still
+  // be worth running.
+  assert.equal(toolset.mcpTools.length, 0);
+  assert.equal(toolset.hasTools, true);
+  assert.ok(
+    toolset.tools.some((t) => t.function.name === "where_am_i"),
+    "where_am_i is offered",
+  );
+  // Called with no arguments, it falls back to the live position.
+  assert.match(await toolset.call("where_am_i", "{}"), /Fiji/);
+  // Explicit arguments win over the supplier.
+  assert.match(
+    await toolset.call("where_am_i", '{"latitude":-27.47,"longitude":153.02}'),
+    /Australia/,
+  );
+  await toolset.close();
+});
+
+test("where_am_i reports a usable error instead of guessing", async () => {
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({}),
+  );
+  await toolset.connect();
+  // No fix and no arguments: say so rather than name a country.
+  assert.match(await toolset.call("where_am_i", "{}"), /^error: no position/);
+  // Swapped lat/long (a common model mistake) must not silently resolve.
+  assert.match(
+    await toolset.call("where_am_i", '{"latitude":177.18,"longitude":-17.77}'),
+    /^error: .*out of range/,
+  );
+  await toolset.close();
+});
+
+test("where_am_i rejects a half-supplied coordinate rather than mixing", async () => {
+  // Boat is in Fiji. A model that supplies only one component used to have it
+  // fused with the live value for the other, answering confidently about a
+  // position neither describes — and "open ocean" reads as authoritative, so
+  // the wrong answer was harder to spot than the guess this tool replaced.
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({ latitude: -17.7696627, longitude: 177.1802972 }),
+  );
+  await toolset.connect();
+  for (const args of [
+    '{"latitude":-27.47}',
+    '{"longitude":153.02}',
+    // Present but unusable: null/NaN-ish values must not fall through to the
+    // live position either, or the same fusion happens by another route.
+    '{"latitude":-27.47,"longitude":null}',
+    '{"latitude":"south","longitude":153.02}',
+  ]) {
+    assert.match(
+      await toolset.call("where_am_i", args),
+      /^error: latitude and longitude must be supplied together/,
+      `half-supplied coordinate must be rejected: ${args}`,
+    );
+  }
+  // The no-argument fallback still works — this must not break the common path.
+  assert.match(await toolset.call("where_am_i", "{}"), /Fiji/);
+  await toolset.close();
+});
+
+test("where_am_i ignores a non-finite live position", async () => {
+  // A GPS path can be present but hold nulls before a fix; that must read as
+  // "no position", not be handed to the geocoder.
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({
+      latitude: Number.NaN,
+      longitude: 177.18,
+    }),
+  );
+  await toolset.connect();
+  assert.match(await toolset.call("where_am_i", "{}"), /^error: no position/);
+  await toolset.close();
 });

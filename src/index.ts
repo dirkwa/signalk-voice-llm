@@ -309,7 +309,7 @@ module.exports = function (app: App) {
           type: "object",
           title: "Tools (MCP)",
           description:
-            "Let the assistant call tools on MCP servers you configure — e.g. fsk-mcp to drive the Freeboard-SK chart plotter (pan/zoom, routes, points of interest). Off by default. NOTE: tool-calling needs a capable model — small local models (e.g. qwen2.5-7b) are unreliable at it; use a hosted model (Groq/Cerebras 70B) or a tool-tuned local model. With no servers listed this section does nothing.",
+            "Let the assistant call tools — both built-in ones and any MCP servers you configure (e.g. fsk-mcp to drive the Freeboard-SK chart plotter: pan/zoom, routes, points of interest). Off by default. Enabling this with no servers listed still gives you the built-in offline tools, such as where_am_i, which resolves the vessel's position to a country without a network connection. NOTE: tool-calling needs a capable model — small local models (e.g. qwen2.5-7b) are unreliable at it; use a hosted model (Groq/Cerebras 70B) or a tool-tuned local model.",
           properties: {
             enabled: {
               type: "boolean",
@@ -437,15 +437,16 @@ module.exports = function (app: App) {
         );
       }
 
-      // --- Build the MCP toolset (async: it connects + discovers tools).
-      // Off unless enabled AND at least one enabled server is configured, so a
-      // default install is a byte-for-byte no-op on the existing chat path. A
-      // server that fails to connect (e.g. fsk-mcp with no Freeboard tab yet)
-      // is skipped inside connect(); we just end up with no tools.
+      // --- Build the toolset (async: it connects to servers + discovers tools).
+      // Off unless enabled, so a default install is a byte-for-byte no-op on
+      // the existing chat path. A server that fails to connect (e.g. fsk-mcp
+      // with no Freeboard tab yet) is skipped inside connect(), leaving the
+      // in-process tools.
       const toolsCfg = config.tools;
-      const wantTools =
-        toolsCfg.enabled &&
-        toolsCfg.mcpServers.some((s) => s.enabled !== false && s.url);
+      // Tools-enabled is enough on its own: the toolset also carries in-process
+      // tools (where_am_i) that need no server, so a boat with no MCP server
+      // configured still gets them.
+      const wantTools = toolsCfg.enabled;
       // A generation guard: if stop()/start() cycles while connect() is in
       // flight, don't publish (or leak) a toolset from the old generation.
       const myGeneration = ++toolsGeneration;
@@ -454,6 +455,15 @@ module.exports = function (app: App) {
           toolsCfg.mcpServers,
           toolsCfg.callTimeoutMs,
           (m) => app.debug(m),
+          {},
+          () => {
+            // Live position for where_am_i when the model supplies none.
+            const raw: unknown = app.getSelfPath("navigation.position");
+            const v = (raw as { value?: unknown })?.value ?? raw;
+            const p = v as
+              { latitude?: number; longitude?: number } | undefined;
+            return { latitude: p?.latitude, longitude: p?.longitude };
+          },
         );
         // Track it for teardown BEFORE connect() runs, so a stop() during the
         // (retrying) connect closes it and its retry loop exits on its next
@@ -467,10 +477,13 @@ module.exports = function (app: App) {
               return built.close();
             }
             toolset = built;
+            // Report on the SERVER surface: local tools always register, so
+            // hasTools is now unconditionally true and would mask a server
+            // that never answered.
             app.debug(
-              built.hasTools
+              built.mcpTools.length > 0
                 ? `tools: ${built.tools.length} available`
-                : "tools: enabled but no server answered",
+                : `tools: ${built.tools.length} local, no server answered`,
             );
           })
           .catch((err) => {
