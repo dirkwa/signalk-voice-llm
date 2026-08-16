@@ -173,4 +173,15 @@ enabled — including any that change boat state — so only add servers you tru
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+signalk-voice-llm 0.5.0 and later is **source available, not open source**.
+See [LICENSE.md](LICENSE.md).
+
+**You may**, free of charge: run it on your own boat or fleet, private or
+commercial; use it for internal company operations; modify it for your own use;
+use it in education and research; and provide professional services around it.
+
+**You may not**: redistribute it, or publish a modified version of it to npm or
+anywhere else. Verbatim copies of official releases may be mirrored and cached.
+
+Versions 0.4.0 and earlier remain available under the Apache License 2.0 — see
+[LICENSE-APACHE-2.0-through-v0.4.0.txt](LICENSE-APACHE-2.0-through-v0.4.0.txt).
