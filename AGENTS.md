@@ -170,6 +170,36 @@ a formatting or lint failure blocks the PR. `.gitattributes` forces LF —
 without it the Windows runner checks out CRLF and `prettier --check` reports
 every line as changed.
 
+## Licensing
+
+From **0.5.0** this plugin is source-available, not open source: use and
+modification are free, redistribution is not. `LICENSE.md` is authoritative.
+
+- **0.4.0 and earlier were Apache-2.0 and stay that way, permanently.** Never
+  rewrite history, retag old releases, or edit the license on an existing tag.
+  Apache-2.0's patent grant (§3) and redistribution rights (§4) for those
+  versions are irrevocable, and pretending otherwise weakens the current
+  license rather than strengthening it.
+- `LICENSE-APACHE-2.0-through-v0.4.0.txt` keeps that history discoverable in
+  the tarball. Do not delete it.
+- **Never propose returning to a permissive license** — that is a decision for
+  the copyright holder alone.
+- `package.json` uses `"license": "SEE LICENSE IN LICENSE.md"`. This is not an
+  SPDX-listed license; inventing an identifier breaks tooling validation.
+- `CONTRIBUTING.md` carries an inbound contribution grant. Without it, merged
+  contributions would fragment ownership and remove the ability to make this
+  kind of decision again.
+- The license text derives from a plain-language template whose authors permit
+  adaptation only if all mention of their project is removed. It has been. Do
+  not add attribution to them back in.
+- **Dependency licenses gate this.** A copyleft runtime dependency would
+  override the whole arrangement. The production tree is currently MIT/ISC
+  except `@osm_borders/maritime_10m`, which is ODbL — a share-alike _database_
+  license. That is fine only because the dataset is never bundled into our
+  tarball; it stays a separate npm package the user installs. If a future
+  change vendors that data into `dist/`, the ODbL share-alike terms attach and
+  this must be re-examined.
+
 ## Releasing
 
 Publishing is driven entirely by tags — never by hand.
@@ -197,8 +227,8 @@ Constraints that have bitten this setup before:
 - `strict` is on. Prefer `unknown` plus narrowing over `any`; the remaining
   `any` uses sit on Signal K's own delta/subscription types, which are
   untyped upstream.
-- `files` in package.json is an allowlist. `dist/`, the icon, README, and
-  LICENSE ship; `src/` and `tsconfig.json` do not.
+- `files` in package.json is an allowlist. `dist/`, the icon, README, and both
+  license files ship; `src/` and `tsconfig.json` do not.
 - **Every source file in this repo is TypeScript**, tooling config included.
   `eslint.config.ts` is loaded by ESLint through `jiti` (hence the devDep) and
   type-checked by `npm run lint:config`, which `ci-lint` runs — so a broken

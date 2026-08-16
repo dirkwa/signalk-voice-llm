@@ -1,3 +1,12 @@
+This Apache License 2.0 applied to signalk-voice-llm version 0.4.0 and all
+earlier releases. Those versions remain available under Apache-2.0 in
+perpetuity, including the patent grant in section 3 and the redistribution
+rights in section 4.
+
+Version 0.5.0 and later are licensed under the terms in LICENSE.md.
+
+---
+
 
                                  Apache License
                            Version 2.0, January 2004
