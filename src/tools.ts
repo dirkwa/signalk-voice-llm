@@ -126,6 +126,8 @@ export class Toolset {
    * others. Never throws.
    */
   async connect(): Promise<void> {
+    // Idempotent: the caller may have registered these already to publish the
+    // offline tools without waiting for the servers below.
     this.registerLocalTools();
     for (const server of this.servers) {
       if (this.closed) return;
@@ -140,8 +142,16 @@ export class Toolset {
    * where_am_i exists because small models answer coordinate-geography
    * questions by guessing: given the boat's real position in Fiji, qwen2.5-7b
    * confidently placed us near Brisbane. A lookup cannot be wrong that way.
+   *
+   * Public and idempotent so the plugin can publish the offline tools up front
+   * rather than waiting out MCP connection retries; connect() calls it too, so
+   * a caller that doesn't need that keeps working unchanged. Calling it twice
+   * must not offer the tool twice — a duplicate function name in the specs
+   * array is an invalid request to the model.
    */
-  private registerLocalTools(): void {
+  registerLocalTools(): void {
+    if (this.closed) return;
+    if (this.dispatch.has("where_am_i")) return;
     this.dispatch.set("where_am_i", {
       kind: "local",
       run: (args) => {
