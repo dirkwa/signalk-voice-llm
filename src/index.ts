@@ -469,14 +469,29 @@ module.exports = function (app: App) {
         // (retrying) connect closes it and its retry loop exits on its next
         // `closed` check — the generation guard alone only blocks publication.
         pendingToolset = built;
+        // Publish the in-process tools immediately, without waiting for MCP
+        // discovery. An unreachable server retries for maxAttempts × backoffMs
+        // (~8s by default), and withholding where_am_i for that window is
+        // backwards: it needs no network, so it should not wait on one. MCP
+        // tools are added to this same instance as each server answers.
+        //
+        // Safe to publish before connect() resolves: register() only appends to
+        // `specs`, and `tools` is read fresh on each voice command, so a
+        // command arriving mid-discovery sees whatever is ready by then. A
+        // stop() closes this instance via either ref (close() clears `specs`,
+        // so hasTools goes false and onCommand takes the plain chat path).
+        built.registerLocalTools();
+        toolset = built;
         void built
           .connect()
           .then(() => {
             if (myGeneration !== toolsGeneration || !running) {
-              // Superseded by a restart/stop while connecting — discard.
+              // Superseded by a restart/stop while connecting — discard. Only
+              // retract the published ref if it is still this instance; a newer
+              // start() may already have published its own.
+              if (toolset === built) toolset = null;
               return built.close();
             }
-            toolset = built;
             // Report on the SERVER surface: local tools always register, so
             // hasTools is now unconditionally true and would mask a server
             // that never answered.

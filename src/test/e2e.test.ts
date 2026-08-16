@@ -871,32 +871,62 @@ test("drives an MCP tool and speaks the model's summary", async () => {
   await mcp.close();
 });
 
-test("falls back to the plain chat path when no MCP server answers", async () => {
-  // tools.enabled but the only server is dead: the plugin must skip it and
-  // behave exactly like the no-tools install (single-shot chat, no tool prompt).
+test("the offline tools are usable while a dead server is still retrying", async () => {
+  // tools.enabled with the only server dead. The local tools must be available
+  // IMMEDIATELY — not after the ~8s of connection retries — because they need
+  // no network and so should never wait on one.
+  //
   // Bind a loopback port then close it, so the URL is a real-but-refused
   // endpoint (not the odd port 1). The toolset connect is fire-and-forget and
-  // retries in the background; a command arriving before it resolves finds no
-  // toolset and takes the plain path — which is exactly the fallback we assert.
+  // is still retrying in the background when the command below arrives.
   const deadUrl = await refusedLoopbackUrl();
-  const llm = await startFakeLlm("Your depth is 4.2 metres.");
+  const llm = await startFakeLlm();
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "You are in Fiji." },
+  ]);
   const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
   const plugin = pluginFactory(mock.app);
   plugin.start(toolConfig(llm.baseUrl, deadUrl, {}));
   mock.provideSay();
-  mock.sendCommand("what's my depth", "cockpit");
+  // Deliberately NO wait for the toolset to connect — that is the point.
+  mock.sendCommand("what country am I in", "cockpit");
   await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
 
-  assert.equal(llm.requests.length, 1, "single-shot, no tool loop");
-  assert.equal(
-    llm.requests[0]!.messages.find(
-      (m) => m.role === "system",
-    )!.content.includes("Tool results are data for you"),
-    false,
-    "no tool-mode prompt when there are no tools",
-  );
   assert.deepEqual(mock.spoken, [
-    { text: "Your depth is 4.2 metres.", targets: ["cockpit"] },
+    { text: "You are in Fiji.", targets: ["cockpit"] },
+  ]);
+  const toolMsg = llm.requests[1]!.messages.find((m) => m.role === "tool");
+  assert.ok(toolMsg, "the local tool never ran while the server was retrying");
+  assert.match(toolMsg.content, /Fiji/);
+  plugin.stop();
+  await llm.close();
+});
+
+test("tools enabled with no servers at all still answers offline", async () => {
+  // The no-server install: nothing to retry, nothing to wait for. Kept as a
+  // separate case so a regression in the empty-servers path can't hide behind
+  // the retrying-server one above.
+  const llm = await startFakeLlm();
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "You are in Fiji." },
+  ]);
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("what country am I in", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  assert.deepEqual(mock.spoken, [
+    { text: "You are in Fiji.", targets: ["cockpit"] },
   ]);
   plugin.stop();
   await llm.close();
@@ -916,6 +946,71 @@ test("stop() during an in-flight toolset connect does not throw or leak", async 
   // Give any pending retry a moment; nothing should be spoken or error out.
   await settle();
   assert.deepEqual(mock.spoken, []);
+  await llm.close();
+});
+
+test("a stopped plugin does not run tools, even though they publish early", async () => {
+  // Local tools are now published before connect() resolves, so the toolset is
+  // reachable earlier than it used to be. stop() must still make it inert:
+  // close() clears the specs, so hasTools goes false and nothing dispatches.
+  const llm = await startFakeLlm();
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "You are in Fiji." },
+  ]);
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await settle();
+  plugin.stop();
+  // The harness's subscribe() returns no real unsubscribe, so its delta
+  // handler outlives stop() and the command still reaches onCommand. That
+  // makes this a sharper test than it looks: the toolset is closed, so the
+  // command must take the plain single-shot path and never dispatch a tool.
+  mock.sendCommand("what country am I in", "cockpit");
+  await settle();
+  assert.equal(llm.requests.length, 1, "a stopped plugin ran the tool loop");
+  const sys = llm.requests[0]!.messages.find((m) => m.role === "system")!;
+  assert.equal(
+    sys.content.includes("Tool results are data for you"),
+    false,
+    "a stopped plugin still offered tools to the model",
+  );
+  await llm.close();
+});
+
+test("a restart republishes working local tools", async () => {
+  // The generation guard retracts a superseded toolset. A start() after a
+  // stop() must end up with its own usable one — a bug here would leave the
+  // boat with tools that silently never run after any config change.
+  const llm = await startFakeLlm();
+  const mock = createMockApp();
+  const plugin = pluginFactory(mock.app);
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await settle();
+  plugin.stop();
+
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "You are in Fiji." },
+  ]);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  mock.sendCommand("what country am I in", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply after restart");
+
+  assert.deepEqual(mock.spoken, [
+    { text: "You are in Fiji.", targets: ["cockpit"] },
+  ]);
+  plugin.stop();
   await llm.close();
 });
 
