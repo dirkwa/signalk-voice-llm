@@ -145,13 +145,35 @@ export class Toolset {
     this.dispatch.set("where_am_i", {
       kind: "local",
       run: (args) => {
-        // The model is told to pass the position from the boat snapshot, but it
-        // routinely omits or garbles arguments — fall back to the live position
-        // the plugin already has rather than failing the call.
-        const lat = numArg(args["latitude"]) ?? this.position?.().latitude;
-        const lon = numArg(args["longitude"]) ?? this.position?.().longitude;
-        if (lat === undefined || lon === undefined) {
-          return "error: no position available (no GPS fix and none supplied)";
+        // A coordinate is a PAIR. Falling back per-component would fuse a
+        // model-supplied latitude with the boat's live longitude and answer
+        // confidently about a place neither of them describes — the exact
+        // failure this tool exists to prevent, but harder to catch because
+        // the result reads as authoritative ("open ocean").
+        const hasLat = args["latitude"] !== undefined;
+        const hasLon = args["longitude"] !== undefined;
+        let lat: number | undefined;
+        let lon: number | undefined;
+        if (hasLat || hasLon) {
+          // Explicit coordinates: both must be present and finite, or reject.
+          lat = numArg(args["latitude"]);
+          lon = numArg(args["longitude"]);
+          if (lat === undefined || lon === undefined) {
+            return (
+              "error: latitude and longitude must be supplied together as " +
+              "finite numbers; omit both to use the vessel's position"
+            );
+          }
+        } else {
+          // The model is told to pass the position from the boat snapshot, but
+          // it routinely omits arguments entirely — fall back to the live
+          // position the plugin already has rather than failing the call.
+          const live = this.position?.();
+          lat = numArg(live?.latitude);
+          lon = numArg(live?.longitude);
+          if (lat === undefined || lon === undefined) {
+            return "error: no position available (no GPS fix and none supplied)";
+          }
         }
         try {
           return describePosition(lat, lon);

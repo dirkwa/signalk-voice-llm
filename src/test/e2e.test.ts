@@ -945,3 +945,161 @@ test("tools disabled is the unchanged single-shot path", async () => {
   await llm.close();
   await mcp.close();
 });
+
+// --- where_am_i end to end -----------------------------------------------
+
+// The regression this tool exists for: the boat's real position in Fiji was
+// answered as "Australia, near Brisbane". These drive the REAL plugin path —
+// app.getSelfPath("navigation.position"), the subscription, the tool loop,
+// say() — because the bug was never in the geocoder, it was in the wiring.
+
+/** Tools on with NO MCP server configured — the offline-boat case. */
+function localToolConfig(llmBaseUrl: string) {
+  return configFor(llmBaseUrl, {
+    tools: {
+      enabled: true,
+      maxIterations: 3,
+      conversationBudgetMs: 30000,
+      callTimeoutMs: 3000,
+      mcpServers: [],
+    },
+  });
+}
+
+test("answers 'what country am I in' from the live position, with no MCP server", async () => {
+  const llm = await startFakeLlm();
+  // The model calls where_am_i with NO arguments — what it actually does in
+  // practice — then speaks the tool's answer.
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "You are in Fiji." },
+  ]);
+  const mock = createMockApp();
+  // The boat's real position, in the shape SignalK serves it.
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await waitFor(
+    () => mock.debugLog.some((l) => l.includes("tools:")),
+    "the toolset never connected",
+  );
+
+  mock.sendCommand("what country am I in", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  assert.deepEqual(mock.spoken, [
+    { text: "You are in Fiji.", targets: ["cockpit"] },
+  ]);
+  // The tool result that reached the model named Fiji — not Australia. This is
+  // the assertion the original bug would have failed.
+  const toolMsg = llm.requests[1]!.messages.find((m) => m.role === "tool");
+  assert.ok(toolMsg, "the tool result was never fed back to the model");
+  assert.match(toolMsg.content, /Fiji/);
+  assert.doesNotMatch(toolMsg.content, /Australia/);
+  // No server configured, yet the tool was still offered.
+  assert.ok(
+    mock.debugLog.some((l) => /no server answered/.test(l)),
+    `expected the local-only tools log, got: ${mock.debugLog.join(" | ")}`,
+  );
+  plugin.stop();
+  await llm.close();
+});
+
+test("explicit coordinates from the model win over the live position", async () => {
+  const llm = await startFakeLlm();
+  llm.setScript([
+    {
+      toolCalls: [
+        {
+          id: "c1",
+          name: "where_am_i",
+          arguments: '{"latitude":-27.47,"longitude":153.02}',
+        },
+      ],
+    },
+    { content: "Those coordinates are in Australia." },
+  ]);
+  const mock = createMockApp();
+  // Live position is Fiji; the explicit pair is Brisbane. The pair must win.
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await waitFor(
+    () => mock.debugLog.some((l) => l.includes("tools:")),
+    "the toolset never connected",
+  );
+
+  mock.sendCommand("what country is at 27 south 153 east", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  const toolMsg = llm.requests[1]!.messages.find((m) => m.role === "tool")!;
+  assert.match(toolMsg.content, /Australia/);
+  assert.doesNotMatch(toolMsg.content, /Fiji/);
+  plugin.stop();
+  await llm.close();
+});
+
+test("a half-supplied coordinate is refused, not fused with the live position", async () => {
+  const llm = await startFakeLlm();
+  // Only a latitude. Fusing it with the boat's live longitude used to yield a
+  // confident "open ocean" — an answer about a place nobody asked about.
+  llm.setScript([
+    {
+      toolCalls: [
+        { id: "c1", name: "where_am_i", arguments: '{"latitude":-27.47}' },
+      ],
+    },
+    { content: "I need both a latitude and a longitude." },
+  ]);
+  const mock = createMockApp();
+  mock.selfPaths["navigation.position"] = {
+    value: { latitude: -17.7696627, longitude: 177.1802972 },
+  };
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await waitFor(
+    () => mock.debugLog.some((l) => l.includes("tools:")),
+    "the toolset never connected",
+  );
+
+  mock.sendCommand("what country is at 27 south", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  const toolMsg = llm.requests[1]!.messages.find((m) => m.role === "tool")!;
+  assert.match(toolMsg.content, /^error: latitude and longitude/);
+  // The model gets a correction it can act on, not a plausible wrong place.
+  assert.doesNotMatch(toolMsg.content, /open ocean/);
+  plugin.stop();
+  await llm.close();
+});
+
+test("says it has no position rather than guessing when there is no fix", async () => {
+  const llm = await startFakeLlm();
+  llm.setScript([
+    { toolCalls: [{ id: "c1", name: "where_am_i", arguments: "{}" }] },
+    { content: "I don't have a position fix right now." },
+  ]);
+  const mock = createMockApp(); // no navigation.position at all
+  const plugin = pluginFactory(mock.app);
+  plugin.start(localToolConfig(llm.baseUrl));
+  mock.provideSay();
+  await waitFor(
+    () => mock.debugLog.some((l) => l.includes("tools:")),
+    "the toolset never connected",
+  );
+
+  mock.sendCommand("what country am I in", "cockpit");
+  await waitFor(() => mock.spoken.length > 0, "no reply was ever spoken");
+
+  const toolMsg = llm.requests[1]!.messages.find((m) => m.role === "tool")!;
+  assert.match(toolMsg.content, /^error: no position/);
+  plugin.stop();
+  await llm.close();
+});

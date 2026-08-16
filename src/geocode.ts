@@ -10,8 +10,13 @@
 // Deliberately OFFLINE. This runs on a boat; the answer must not depend on
 // having a connection, and "where am I" is exactly the question you ask when
 // you are somewhere without one. coordinate_to_country is a bundled polygon
-// dataset (~64 KB, no network, no API key). Country names come from Node's
-// built-in Intl.DisplayNames, so no second dependency is needed.
+// dataset — no network, no API key. Country names come from Node's built-in
+// Intl.DisplayNames, so no second dependency is needed.
+//
+// The cost is install size, not tarball size: the OSM maritime-borders dataset
+// it depends on is ~47 MB unpacked in node_modules. Our own published tarball
+// is unaffected. That is the price of answering "what country am I in?" with
+// no connection, which on a boat is when the question is actually asked.
 //
 // The dataset resolves maritime zones (EEZ) as well as land, so a position at
 // sea within a country's waters still names that country — which is the useful

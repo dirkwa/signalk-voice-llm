@@ -617,3 +617,53 @@ test("where_am_i reports a usable error instead of guessing", async () => {
   );
   await toolset.close();
 });
+
+test("where_am_i rejects a half-supplied coordinate rather than mixing", async () => {
+  // Boat is in Fiji. A model that supplies only one component used to have it
+  // fused with the live value for the other, answering confidently about a
+  // position neither describes — and "open ocean" reads as authoritative, so
+  // the wrong answer was harder to spot than the guess this tool replaced.
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({ latitude: -17.7696627, longitude: 177.1802972 }),
+  );
+  await toolset.connect();
+  for (const args of [
+    '{"latitude":-27.47}',
+    '{"longitude":153.02}',
+    // Present but unusable: null/NaN-ish values must not fall through to the
+    // live position either, or the same fusion happens by another route.
+    '{"latitude":-27.47,"longitude":null}',
+    '{"latitude":"south","longitude":153.02}',
+  ]) {
+    assert.match(
+      await toolset.call("where_am_i", args),
+      /^error: latitude and longitude must be supplied together/,
+      `half-supplied coordinate must be rejected: ${args}`,
+    );
+  }
+  // The no-argument fallback still works — this must not break the common path.
+  assert.match(await toolset.call("where_am_i", "{}"), /Fiji/);
+  await toolset.close();
+});
+
+test("where_am_i ignores a non-finite live position", async () => {
+  // A GPS path can be present but hold nulls before a fix; that must read as
+  // "no position", not be handed to the geocoder.
+  const toolset = new Toolset(
+    [],
+    3000,
+    () => {},
+    {},
+    () => ({
+      latitude: Number.NaN,
+      longitude: 177.18,
+    }),
+  );
+  await toolset.connect();
+  assert.match(await toolset.call("where_am_i", "{}"), /^error: no position/);
+  await toolset.close();
+});
