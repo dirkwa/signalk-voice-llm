@@ -172,12 +172,15 @@ module.exports = function (app: App) {
   let unsubscribes: Array<() => void> = [];
   let say: SayFn | null = null;
   let running = false;
-  // The PUBLISHED toolset onCommand uses, set only after connect() resolves; or
-  // null when tools are off / unconfigured.
+  // The PUBLISHED toolset onCommand uses; null when tools are off. Set as soon
+  // as the local tools are registered — BEFORE connect() runs — so the offline
+  // tools don't wait out MCP connection retries. Server tools appear on this
+  // same instance as each server answers.
   let toolset: Toolset | null = null;
-  // The toolset currently being connected (set before connect() starts), so
-  // stop() can tear it down even mid-connect — otherwise its retry loop would
-  // keep running after the plugin stopped, since it hasn't been published yet.
+  // The same instance while its connect() is still in flight, so stop() can
+  // tear it down mid-connect and its retry loop exits on the next `closed`
+  // check. Kept separate from `toolset` because a superseded generation
+  // retracts the published ref but still has a connect() to stop.
   let pendingToolset: Toolset | null = null;
   // Bumped on every start()/stop() so a connect() that finishes after a restart
   // doesn't publish a stale toolset.
